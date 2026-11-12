@@ -7,7 +7,8 @@ Gem::Specification.new do |spec|
   spec.authors = ['Abdelkader Boudih']
   spec.email = ['oss@seuros.com']
   spec.summary = 'Initial bounded hierarchical timing wheel with a native Rust core'
-  spec.description = 'Local unstable expiry index: register and cancel deadlines, drain due IDs on explicit ticks; not a timer runtime.'
+  spec.description = 'Local unstable expiry index: register and cancel deadlines, drain due IDs on explicit ticks; ' \
+                     'not a timer runtime.'
   spec.homepage = 'https://github.com/seuros/wheel_machines'
   spec.license = 'MIT'
   spec.required_ruby_version = '>= 4.0.0'
