@@ -1,0 +1,43 @@
+module WheelMachines
+  VERSION: String
+  CAPACITY: Integer
+  MAX_CASCADES: Integer
+
+  class Due < Data
+    attr_reader id: Integer
+    attr_reader deadline: Integer
+    def self.new: (Integer id, Integer deadline) -> Due
+                | (id: Integer, deadline: Integer) -> Due
+  end
+
+  class Drain < Data
+    type status = :caught_up | :output_full | :budget_spent
+
+    attr_reader due: Array[Due]
+    attr_reader cascaded: Integer
+    attr_reader status: status
+    def self.new: (Array[Due] due, Integer cascaded, status status) -> Drain
+                | (due: Array[Due], cascaded: Integer, status: status) -> Drain
+    def work: () -> Integer
+    def caught_up?: () -> bool
+  end
+
+  class Timer
+  end
+
+  class Wheel
+    def self.new: () -> Wheel
+    def self.starting_at: (Integer now) -> Wheel
+    def capacity: () -> Integer
+    def size: () -> Integer
+    def empty?: () -> bool
+    def now: () -> Integer
+    def next_wake: () -> Integer?
+    def register: (Integer id, Integer deadline) -> (Timer | :elapsed | :full | :exhausted)
+    def cancel: (Timer) -> Integer?
+    def deadline: (Timer) -> Integer?
+    def advance: (Integer now) -> (:advanced | :regressed)
+    def drain: (Integer budget, Integer limit) -> Drain
+    def tick: (Integer now, Integer budget, Integer limit) -> (Drain | :regressed)
+  end
+end
