@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/wheel_machines/compare/wheel-machines-v0.3.0...wheel-machines-v0.4.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* see CONVENTIONS: one exhaustive Refusal per crate, Result from every mutator, honoured idempotent repeats, Ruby mirrors the core. No compatibility aliases. cancel returns Result<I, Refusal>; the Ruby Timer class is Handle.
+
+### Features
+
+* fold Regressed into Refusal, refuse stale cancels, Ruby Handle ([4fa0048](https://github.com/seuros/wheel_machines/commit/4fa00481e46931a9563d0ac024adeb4e5dd954a8))
+
 ## [0.3.0](https://github.com/seuros/wheel_machines/compare/wheel-machines-v0.2.0...wheel-machines-v0.3.0) (2026-11-13)
 
 
