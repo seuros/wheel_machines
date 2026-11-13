@@ -25,13 +25,28 @@ module WheelMachines
   end
 
   # Mirrors the core's `Handle`: names one registration on the wheel that
-  # issued it. Opaque; it cannot be built or copied by hand.
+  # issued it and carries that wheel's scope. Opaque; it cannot be built or
+  # copied by hand. A wheel in another scope answers :stale to it.
   class Handle
+    # The scope of the wheel that issued it, 0..65535.
+    def scope: () -> Integer
   end
 
   class Wheel
+    # Tick zero, scope zero, nothing issued.
     def self.new: () -> Wheel
-    def self.starting_at: (Integer now) -> Wheel
+    # Tick zero. `scope` is an Integer in 0..65535: TypeError otherwise,
+    # RangeError outside the range.
+    def self.with_scope: (Integer scope) -> Wheel
+    def self.starting_at: (Integer scope, Integer now) -> Wheel
+    # Continues `scope` after a restart from a saved `issued` count. Restores
+    # only the handle sequence: the wheel is empty. RangeError when `issued`
+    # is above 2**48 - 1.
+    def self.resumed: (Integer scope, Integer issued, Integer now) -> Wheel
+    # The scope carried by every Handle this wheel issues.
+    def scope: () -> Integer
+    # Handles issued in this scope so far: the count to save for `resumed`.
+    def issued: () -> Integer
     def capacity: () -> Integer
     def size: () -> Integer
     def empty?: () -> bool
@@ -42,8 +57,10 @@ module WheelMachines
     # carries is `now`.
     # Honoured: a Handle. Refused: :elapsed, :full, :exhausted.
     def register: (Integer id, Integer deadline) -> (Handle | :elapsed | :full | :exhausted)
-    # Honoured: the id that was registered. Refused: :stale.
+    # Honoured: the id that was registered. Refused: :stale, a Handle from a
+    # wheel in another scope included.
     def cancel: (Handle) -> (Integer | :stale)
+    # nil for a Handle that names no live registration here.
     def deadline: (Handle) -> Integer?
     # Honoured: :advanced (repeating the current tick included). Refused: :regressed.
     def advance: (Integer now) -> (:advanced | :regressed)

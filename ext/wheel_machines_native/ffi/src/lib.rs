@@ -1,7 +1,7 @@
 //! Thin binding to the bounded hierarchical timing wheel.
 mod init;
 
-use std::{cell::RefCell, sync::Arc};
+use std::cell::RefCell;
 
 use magnus::{Error, Integer, Ruby, TryConvert, Value, prelude::*, typed_data::Obj};
 use wheel_machines::{Drain, Due, Handle, Refusal, Status};
@@ -32,6 +32,22 @@ impl TryConvert for Number {
     }
 }
 
+/// An issuer scope: an Integer in `0..=65535`.
+#[derive(Clone, Copy)]
+struct Scope(u16);
+
+impl TryConvert for Scope {
+    fn try_convert(value: Value) -> Result<Self, Error> {
+        if Integer::from_value(value).is_none() {
+            return Err(Error::new(
+                Ruby::get_with(value).exception_type_error(),
+                "expected an Integer scope (0..=65535)",
+            ));
+        }
+        u16::try_convert(value).map(Self)
+    }
+}
+
 const fn refusal(refusal: Refusal) -> &'static str {
     match refusal {
         Refusal::Elapsed => "elapsed",
@@ -42,29 +58,58 @@ const fn refusal(refusal: Refusal) -> &'static str {
     }
 }
 
-/// `WheelMachines::Handle`: the core's `Handle`, tied to the wheel that issued it.
+/// `WheelMachines::Handle`: the core's `Handle`. It carries the scope of the
+/// wheel that issued it; the core refuses it anywhere else.
 #[magnus::wrap(class = "WheelMachines::Handle", free_immediately, size)]
-struct Issued {
-    owner: Arc<()>,
-    handle: Handle,
+struct Issued(Handle);
+
+impl Issued {
+    const fn scope(&self) -> u16 {
+        self.0.scope()
+    }
 }
 
 #[magnus::wrap(class = "WheelMachines::Wheel", free_immediately, size)]
 struct Wheel {
-    owner: Arc<()>,
     core: RefCell<Box<Core>>,
 }
 
 impl Wheel {
     fn new() -> Self {
-        Self::starting_at(Number(0))
+        Self::build(Core::new())
     }
 
-    fn starting_at(now: Number) -> Self {
+    fn with_scope(scope: Scope) -> Self {
+        Self::build(Core::with_scope(scope.0))
+    }
+
+    fn starting_at(scope: Scope, now: Number) -> Self {
+        Self::build(Core::starting_at(scope.0, now.0))
+    }
+
+    fn resumed(ruby: &Ruby, scope: Scope, issued: Number, now: Number) -> Result<Self, Error> {
+        Core::resumed(scope.0, issued.0, now.0)
+            .map(Self::build)
+            .ok_or_else(|| {
+                Error::new(
+                    ruby.exception_range_error(),
+                    "issued is past the last sequence of a scope (2**48 - 1)",
+                )
+            })
+    }
+
+    fn build(core: Core) -> Self {
         Self {
-            owner: Arc::new(()),
-            core: RefCell::new(Box::new(Core::starting_at(now.0))),
+            core: RefCell::new(Box::new(core)),
         }
+    }
+
+    fn scope(&self) -> u16 {
+        self.core.borrow().scope()
+    }
+
+    fn issued(&self) -> u64 {
+        self.core.borrow().issued()
     }
 
     fn register(
@@ -76,24 +121,14 @@ impl Wheel {
         this.check_frozen()?;
         let outcome = this.core.borrow_mut().register(id.0, deadline.0);
         Ok(match outcome {
-            Ok(handle) => ruby
-                .obj_wrap(Issued {
-                    owner: Arc::clone(&this.owner),
-                    handle,
-                })
-                .as_value(),
+            Ok(handle) => ruby.obj_wrap(Issued(handle)).as_value(),
             Err(refused) => ruby.to_symbol(refusal(refused)).as_value(),
         })
     }
 
-    /// A handle issued by another wheel is stale here, whatever its slot says.
     fn cancel(ruby: &Ruby, this: Obj<Self>, issued: Obj<Issued>) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = if Arc::ptr_eq(&this.owner, &issued.owner) {
-            this.core.borrow_mut().cancel(issued.handle)
-        } else {
-            Err(Refusal::Stale)
-        };
+        let outcome = this.core.borrow_mut().cancel(issued.0);
         Ok(match outcome {
             Ok(id) => ruby.integer_from_u64(id).as_value(),
             Err(refused) => ruby.to_symbol(refusal(refused)).as_value(),
@@ -101,10 +136,7 @@ impl Wheel {
     }
 
     fn deadline(&self, issued: Obj<Issued>) -> Option<u64> {
-        if !Arc::ptr_eq(&self.owner, &issued.owner) {
-            return None;
-        }
-        self.core.borrow().deadline(issued.handle)
+        self.core.borrow().deadline(issued.0)
     }
 
     fn advance(ruby: &Ruby, this: Obj<Self>, now: Number) -> Result<Value, Error> {

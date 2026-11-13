@@ -4,6 +4,14 @@ use std::vec::Vec;
 
 use crate::{Drain, Due, Handle, Refusal, Wheel};
 
+/// A wheel resumed after `issued` handle ids, to reach the end of the sequence.
+pub fn resumed<const N: usize>(scope: u16, issued: u64, now: u64) -> Wheel<u64, N> {
+    let Some(wheel) = Wheel::resumed(scope, issued, now) else {
+        panic!("{issued} is past the last sequence of a scope");
+    };
+    wheel
+}
+
 /// Deterministic splitmix64 stream; the tests own their draws.
 pub struct Rng(pub u64);
 

@@ -6,6 +6,8 @@ extern crate std;
 
 use core::fmt;
 
+use periscope_machines::{Issuer, scope_of};
+
 /// Wheel levels; eleven six-bit digits cover every `u64` tick.
 const LEVELS: usize = 11;
 /// Slots per level.
@@ -18,15 +20,25 @@ const NIL: usize = usize::MAX;
 /// Most cascade moves one registration can ever be charged before it is due.
 pub const MAX_CASCADES: usize = LEVELS - 1;
 
-/// Opaque generation-checked registration, scoped to one wheel lifetime.
+/// Opaque registration: the entry it sits in and the scoped id it was issued
+/// under. Only the wheel that issued it honours it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Handle {
     slot: usize,
-    generation: u64,
+    /// Scoped id from the wheel's issuer; never reissued.
+    key: u64,
+}
+
+impl Handle {
+    /// The scope of the wheel that issued this handle.
+    #[must_use]
+    pub const fn scope(&self) -> u16 {
+        scope_of(self.key)
+    }
 }
 
 /// Why a call was refused. A refused call changes nothing: not the tick, not
-/// a registration, not a generation.
+/// a registration, not an issued id.
 ///
 /// This is the crate's one refusal type. [`Wheel::register`] answers
 /// [`Elapsed`](Self::Elapsed), [`Full`](Self::Full) or
@@ -40,7 +52,7 @@ pub enum Refusal {
     Elapsed,
     /// Every entry is in use by a registration that is neither cancelled nor drained.
     Full,
-    /// The generation space is spent; no further handle can be issued.
+    /// Every handle id of this wheel's scope has been issued; none is reissued.
     Exhausted,
     /// The tick is earlier than the one the wheel already holds.
     Regressed {
@@ -48,7 +60,8 @@ pub enum Refusal {
         now: u64,
     },
     /// The handle does not name a live registration: it was already cancelled
-    /// or drained, its entry was reused, or it came from another wheel.
+    /// or drained, or this wheel never issued it (another scope, or an id not
+    /// issued yet).
     Stale,
 }
 
@@ -57,7 +70,7 @@ impl fmt::Display for Refusal {
         match self {
             Self::Elapsed => f.write_str("deadline is not after the wheel's tick"),
             Self::Full => f.write_str("every entry is in use"),
-            Self::Exhausted => f.write_str("generation space exhausted"),
+            Self::Exhausted => f.write_str("every handle of this scope has been issued"),
             Self::Regressed { now } => write!(f, "tick is earlier than the wheel's tick {now}"),
             Self::Stale => f.write_str("handle does not name a live registration"),
         }
@@ -130,7 +143,8 @@ struct Node<I> {
     /// `None` while the entry is on the free list.
     id: Option<I>,
     deadline: u64,
-    generation: u64,
+    /// Scoped id of the registration last filed here.
+    key: u64,
     prev: usize,
     next: usize,
     level: usize,
@@ -141,7 +155,7 @@ impl<I> Node<I> {
     const FREE: Self = Self {
         id: None,
         deadline: 0,
-        generation: 0,
+        key: 0,
         prev: NIL,
         next: NIL,
         level: 0,
@@ -168,7 +182,7 @@ pub struct Wheel<I, const N: usize> {
     /// Tick the slots are indexed against; trails `now` while a drain is pending.
     elapsed: u64,
     now: u64,
-    generation: u64,
+    issuer: Issuer,
 }
 
 impl<I: Copy, const N: usize> Default for Wheel<I, N> {
@@ -178,15 +192,50 @@ impl<I: Copy, const N: usize> Default for Wheel<I, N> {
 }
 
 impl<I: Copy, const N: usize> Wheel<I, N> {
-    /// Empty wheel at tick zero.
+    /// Empty wheel at tick zero, in scope zero, with no handle issued.
     #[must_use]
     pub const fn new() -> Self {
-        Self::starting_at(0)
+        Self::with_scope(0)
     }
 
-    /// Empty wheel whose tick starts at `now`.
+    /// Empty wheel at tick zero whose handles carry `scope`.
+    ///
+    /// Handles are only meaningful to the wheel that issued them. Two wheels
+    /// in the same scope issue the same handles, so give every wheel whose
+    /// handles could meet its own scope.
     #[must_use]
-    pub const fn starting_at(now: u64) -> Self {
+    pub const fn with_scope(scope: u16) -> Self {
+        Self::starting_at(scope, 0)
+    }
+
+    /// Empty wheel whose handles carry `scope` and whose tick starts at `now`.
+    #[must_use]
+    pub const fn starting_at(scope: u16, now: u64) -> Self {
+        Self::build(Issuer::new(scope), now)
+    }
+
+    /// Empty wheel that continues `scope` after a restart: `issued` is what
+    /// [`Wheel::issued`] answered when the caller saved it, and the tick
+    /// starts at `now`.
+    ///
+    /// Only the handle sequence is restored. Nothing is registered: every
+    /// handle issued before the restart is [`Refusal::Stale`] here, and
+    /// re-registering what was pending is the caller's job. The next handle
+    /// carries sequence `issued + 1`, so none is reissued as long as the saved
+    /// count is not lower than what the wheel had really issued; save it
+    /// before handing a handle out.
+    ///
+    /// `None` when `issued` is beyond `periscope_machines::SEQUENCE_MAX`,
+    /// which no wheel reaches.
+    #[must_use]
+    pub const fn resumed(scope: u16, issued: u64, now: u64) -> Option<Self> {
+        match Issuer::resumed(scope, issued) {
+            Some(sequence) => Some(Self::build(sequence, now)),
+            None => None,
+        }
+    }
+
+    const fn build(issuer: Issuer, now: u64) -> Self {
         let mut nodes = [Node::<I>::FREE; N];
         let mut index = 0;
         while index < N {
@@ -202,8 +251,21 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
             len: 0,
             elapsed: now,
             now,
-            generation: 0,
+            issuer,
         }
+    }
+
+    /// The scope carried by every handle this wheel issues.
+    #[must_use]
+    pub const fn scope(&self) -> u16 {
+        self.issuer.scope()
+    }
+
+    /// Handles issued in this scope so far, live or not: the count to save
+    /// for [`Wheel::resumed`].
+    #[must_use]
+    pub const fn issued(&self) -> u64 {
+        self.issuer.issued()
     }
 
     /// Compiled capacity `N`.
@@ -230,7 +292,8 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
         self.now
     }
 
-    /// Deadline of a live registration; `None` for a stale or foreign handle.
+    /// Deadline of a live registration; `None` for a handle that names none,
+    /// one this wheel never issued included.
     #[must_use]
     pub fn deadline(&self, handle: Handle) -> Option<u64> {
         self.lookup(handle).map(|index| self.nodes[index].deadline)
@@ -259,7 +322,8 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
     ///
     /// [`Refusal::Elapsed`] for a deadline at or before the tick,
     /// [`Refusal::Full`] when all `N` entries are in use, and
-    /// [`Refusal::Exhausted`] once `u64::MAX` handles have been issued.
+    /// [`Refusal::Exhausted`] once all `periscope_machines::SEQUENCE_MAX`
+    /// (2^48 - 1) handle ids of the wheel's scope have been issued.
     pub const fn register(&mut self, id: I, deadline: u64) -> Result<Handle, Refusal> {
         if deadline <= self.now {
             return Err(Refusal::Elapsed);
@@ -267,17 +331,18 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
         if self.free == NIL {
             return Err(Refusal::Full);
         }
-        let Some(generation) = self.generation.checked_add(1) else {
-            return Err(Refusal::Exhausted);
+        // Last check: an id is only spent on a registration that is honoured.
+        let key = match self.issuer.issue() {
+            Ok(key) => key,
+            Err(periscope_machines::Refusal::Exhausted) => return Err(Refusal::Exhausted),
         };
         let index = self.free;
         self.free = self.nodes[index].next;
-        self.generation = generation;
         self.len += 1;
         let node = &mut self.nodes[index];
         node.id = Some(id);
         node.deadline = deadline;
-        node.generation = generation;
+        node.key = key;
         // A deadline inside the range being cascaded queues behind the entries
         // still waiting there, so equal deadlines keep registration order.
         match self.cascade {
@@ -286,10 +351,7 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
             }
             Some(_) | None => self.settle(index),
         }
-        Ok(Handle {
-            slot: index,
-            generation,
-        })
+        Ok(Handle { slot: index, key })
     }
 
     /// Remove a registration that has not been emitted, returning its id.
@@ -297,8 +359,9 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
     /// # Errors
     ///
     /// [`Refusal::Stale`] for a handle that does not name a live registration:
-    /// already cancelled, already drained, reused or out of range. The wheel
-    /// is unchanged.
+    /// already cancelled, already drained, or never issued by this wheel
+    /// (another scope). The wheel is unchanged. A repeat on a dead handle is
+    /// never honoured: the wheel keeps no record of how a registration ended.
     pub fn cancel(&mut self, handle: Handle) -> Result<I, Refusal> {
         let index = self.lookup(handle).ok_or(Refusal::Stale)?;
         let due = self.release(index).ok_or(Refusal::Stale)?;
@@ -394,9 +457,14 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
         Ok(self.drain(budget, out))
     }
 
+    /// Origin first: a handle this wheel's issuer never handed out names
+    /// nothing here, whatever entry it points at.
     fn lookup(&self, handle: Handle) -> Option<usize> {
+        if !self.issuer.owns(handle.key) {
+            return None;
+        }
         let node = self.nodes.get(handle.slot)?;
-        (node.id.is_some() && node.generation == handle.generation).then_some(handle.slot)
+        (node.id.is_some() && node.key == handle.key).then_some(handle.slot)
     }
 
     /// Earliest non-empty slot: lower levels always expire before higher ones,

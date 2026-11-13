@@ -9,10 +9,10 @@ Allocation-free `no_std` expiry index. A `Wheel<I, N>` holds at most `N`
 registrations of caller ids `I` in eleven levels of 64 slots, which together
 cover every `u64` tick: no deadline is too far away, and a full wheel refuses
 new registrations instead of evicting live ones. `register` returns a
-generation-checked `Handle`; `cancel` removes a registration that has not been
-emitted and returns its id. A handle that no longer names a live registration
-(cancelled, drained, or its entry reused) is refused as `Stale`, so it can
-never cancel the entry that reused its slot.
+`Handle` carrying a scoped id that is never reissued; `cancel` removes a
+registration that has not been emitted and returns its id. A handle that no
+longer names a live registration (cancelled, drained, or its entry reused) is
+refused as `Stale`, so it can never cancel the entry that reused its slot.
 
 Time is explicit. The wheel has no clock and fires no callbacks: `advance`
 moves its tick, a backwards tick is refused as `Regressed { now }`, and `drain`
@@ -32,8 +32,26 @@ which a drain next has work, which is never later than the earliest deadline.
 
 A deadline at or before the current tick is refused as `Elapsed` rather than
 queued: the caller already knows it is due. This in-memory index has no
-persistence and no wire format; handles are scoped to one wheel lifetime. The
-slot table costs 704 `usize` words regardless of `N`.
+persistence and no wire format. The slot table costs 704 `usize` words
+regardless of `N`.
+
+**Scopes.** A handle is only meaningful to the wheel that issued it. Handle
+ids come from a `periscope_machines::Issuer`: the wheel's scope in the top 16
+bits, a sequence counted from one below. `Wheel::with_scope(scope)` and
+`Wheel::starting_at(scope, now)` choose the scope; `new()` is scope zero at
+tick zero. `Wheel::scope` and `Handle::scope` read it.
+`cancel` answers `Stale` and `deadline` answers `None` for a handle the wheel
+did not issue, before looking at any entry. Give each wheel its own scope: the
+core reads no clock and no random source, so it cannot pick one, and two wheels
+left in the same scope issue the same handles. A scope is `Exhausted` after
+2^48 - 1 handles.
+
+**Restarts.** A fresh wheel counts from one again, so a handle that outlived a
+restart could name a new registration. Save `Wheel::issued` and rebuild with
+`Wheel::resumed(scope, issued, now)`, or give each incarnation a new scope.
+`resumed` restores only the handle sequence: the wheel is empty, every earlier
+handle is `Stale`, and re-registering what was pending is the caller's job. It
+is `None` when `issued` is beyond `periscope_machines::SEQUENCE_MAX`.
 
 `Refusal` is the crate's one refusal type and a refused call changes nothing:
 `register` answers `Elapsed`, `Full` or `Exhausted`, `cancel` answers `Stale`,
@@ -66,4 +84,13 @@ assert_eq!(out[0], Due::new(8, 90));
 assert_eq!(wheel.cancel(lease), Ok(7));
 assert_eq!(wheel.cancel(lease), Err(Refusal::Stale));
 assert_eq!(wheel.tick(99, 16, &mut out), Err(Refusal::Regressed { now: 100 }));
+
+// Another wheel, another scope: it refuses a handle it did not issue.
+let mut leases = Wheel::<u64, 8>::with_scope(1);
+let mut retries = Wheel::<u64, 8>::with_scope(2);
+let handle = leases.register(7, 5_000).expect("room");
+retries.register(8, 5_000).expect("room");
+assert_eq!(handle.scope(), 1);
+assert_eq!(retries.cancel(handle), Err(Refusal::Stale));
+assert_eq!(leases.cancel(handle), Ok(7));
 ```

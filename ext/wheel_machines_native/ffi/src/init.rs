@@ -1,5 +1,5 @@
 //! Private native entry point.
-use crate::{CAPACITY, Wheel};
+use crate::{CAPACITY, Issued, Wheel};
 use magnus::{Error, Ruby, function, method, prelude::*};
 use wheel_machines::MAX_CASCADES;
 
@@ -10,10 +10,15 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     module.const_set("MAX_CASCADES", MAX_CASCADES)?;
     let handle = module.define_class("Handle", ruby.class_object())?;
     handle.undef_default_alloc_func();
+    handle.define_method("scope", method!(Issued::scope, 0))?;
     let class = module.define_class("Wheel", ruby.class_object())?;
     class.undef_default_alloc_func();
     class.define_singleton_method("new", function!(Wheel::new, 0))?;
-    class.define_singleton_method("starting_at", function!(Wheel::starting_at, 1))?;
+    class.define_singleton_method("with_scope", function!(Wheel::with_scope, 1))?;
+    class.define_singleton_method("starting_at", function!(Wheel::starting_at, 2))?;
+    class.define_singleton_method("resumed", function!(Wheel::resumed, 3))?;
+    class.define_method("scope", method!(Wheel::scope, 0))?;
+    class.define_method("issued", method!(Wheel::issued, 0))?;
     class.define_method("register", method!(Wheel::register, 2))?;
     class.define_method("cancel", method!(Wheel::cancel, 1))?;
     class.define_method("deadline", method!(Wheel::deadline, 1))?;

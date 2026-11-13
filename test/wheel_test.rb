@@ -61,19 +61,105 @@ class WheelTest < Minitest::Test
     assert_equal 8, wheel.cancel(replacement)
   end
 
-  def test_opaque_owner_lifetime_and_gc
+  # The review's sequence: a handle from one wheel cancelled an unrelated
+  # registration in another. In different scopes each refuses the other's.
+  def test_handle_from_another_scope_is_refused_and_changes_nothing
+    a = WheelMachines::Wheel.with_scope(1)
+    b = WheelMachines::Wheel.with_scope(2)
+    from_a = a.register(1, 10)
+    from_b = b.register(2, 10)
+    assert_equal [1, 2, 1, 2], [a.scope, b.scope, from_a.scope, from_b.scope]
+    assert_equal :stale, b.cancel(from_a)
+    assert_nil b.deadline(from_a)
+    assert_equal :stale, a.cancel(from_b)
+    assert_nil a.deadline(from_b)
+    assert_equal [1, 1, 10, 10], [a.size, b.size, a.deadline(from_a), b.deadline(from_b)]
+    assert_equal [1, 2], [a.cancel(from_a), b.cancel(from_b)]
+  end
+
+  # The core cannot pick a scope: two wheels left in scope zero issue the same
+  # handles, and one honours the other's.
+  def test_wheels_left_in_the_same_scope_still_alias
     a = WheelMachines::Wheel.new
     b = WheelMachines::Wheel.new
     handle = a.register(1, 10)
-    b.register(1, 10)
-    assert_equal :stale, b.cancel(handle)
-    assert_nil b.deadline(handle)
-    assert_equal 1, b.size
+    b.register(2, 10)
+    assert_equal [0, 0, 0], [a.scope, b.scope, handle.scope]
+    assert_equal 2, b.cancel(handle)
+    assert_predicate b, :empty?
+  end
+
+  def test_scoped_constructors
+    wheel = WheelMachines::Wheel.starting_at(65_535, 100)
+    assert_equal [65_535, 100, 0], [wheel.scope, wheel.now, wheel.issued]
+    assert_equal 65_535, wheel.register(1, 101).scope
+    assert_equal 1, wheel.issued
+    plain = WheelMachines::Wheel.new
+    assert_equal [0, 0, 0], [plain.scope, plain.now, plain.issued]
+    assert_equal [9, 0], [WheelMachines::Wheel.with_scope(9).scope, WheelMachines::Wheel.with_scope(9).now]
+    [1.0, nil, '1', Object.new].each do |value|
+      assert_raises(TypeError) { WheelMachines::Wheel.with_scope(value) }
+      assert_raises(TypeError) { WheelMachines::Wheel.starting_at(value, 0) }
+      assert_raises(TypeError) { WheelMachines::Wheel.starting_at(0, value) }
+      assert_raises(TypeError) { WheelMachines::Wheel.resumed(value, 0, 0) }
+      assert_raises(TypeError) { WheelMachines::Wheel.resumed(0, value, 0) }
+      assert_raises(TypeError) { WheelMachines::Wheel.resumed(0, 0, value) }
+    end
+    [-1, 65_536, 2**64].each do |scope|
+      assert_raises(RangeError) { WheelMachines::Wheel.with_scope(scope) }
+      assert_raises(RangeError) { WheelMachines::Wheel.starting_at(scope, 0) }
+      assert_raises(RangeError) { WheelMachines::Wheel.resumed(scope, 0, 0) }
+    end
+    assert_raises(RangeError) { WheelMachines::Wheel.starting_at(0, -1) }
+    assert_raises(ArgumentError) { WheelMachines::Wheel.starting_at(7) }
+  end
+
+  # A fresh wheel counts from one again, so a handle that outlived a restart
+  # would name a new registration. A resumed one continues the scope.
+  def test_resumed_wheel_continues_its_scope_and_refuses_earlier_handles
+    first = WheelMachines::Wheel.starting_at(5, 100)
+    old = 3.times.map { |i| first.register(i, 200).tap { |handle| first.cancel(handle) } }
+    old << first.register(9, 300)
+    assert_equal 4, first.issued
+
+    wheel = WheelMachines::Wheel.resumed(first.scope, first.issued, first.now)
+    assert_equal [5, 4, 100, 0], [wheel.scope, wheel.issued, wheel.now, wheel.size]
+    assert_nil wheel.next_wake
+    fresh = [wheel.register(7, 150), wheel.register(8, 150)]
+    assert_equal [5, 5, 6], [fresh.first.scope, fresh.last.scope, wheel.issued]
+    old.each do |handle|
+      assert_equal :stale, wheel.cancel(handle)
+      assert_nil wheel.deadline(handle)
+    end
+    assert_equal [2, 150, 150], [wheel.size, *fresh.map { |handle| wheel.deadline(handle) }]
+    assert_equal [7, 8], fresh.map { |handle| wheel.cancel(handle) }
+  end
+
+  def test_resumed_at_the_last_sequence_is_spent_and_past_it_raises
+    last = 2**48 - 1
+    wheel = WheelMachines::Wheel.resumed(3, last - 1, 0)
+    assert_equal :elapsed, wheel.register(1, 0)
+    assert_equal last - 1, wheel.issued
+    handle = wheel.register(1, 10)
+    assert_equal [3, last], [handle.scope, wheel.issued]
+    assert_equal :exhausted, wheel.register(2, 10)
+    assert_equal [1, last], [wheel.size, wheel.issued]
+    spent = WheelMachines::Wheel.resumed(3, last, 0)
+    assert_equal :exhausted, spent.register(1, 10)
+    assert_equal [0, last], [spent.size, spent.issued]
+    assert_raises(RangeError) { WheelMachines::Wheel.resumed(3, last + 1, 0) }
+    assert_raises(RangeError) { WheelMachines::Wheel.resumed(3, -1, 0) }
+  end
+
+  def test_opaque_handles_outlive_their_wheel
+    a = WheelMachines::Wheel.with_scope(1)
+    handle = a.register(1, 10)
     assert_raises(TypeError) { WheelMachines::Handle.allocate }
     assert_raises(TypeError) { WheelMachines::Wheel.allocate }
     assert_raises(TypeError) { handle.dup }
     a = nil
     GC.start
+    assert_equal 1, handle.scope
     assert_equal :stale, WheelMachines::Wheel.new.cancel(handle)
   end
 
@@ -91,7 +177,7 @@ class WheelTest < Minitest::Test
   end
 
   def test_time_only_moves_forward_and_elapsed_deadlines_are_refused
-    wheel = WheelMachines::Wheel.starting_at(100)
+    wheel = WheelMachines::Wheel.starting_at(0, 100)
     assert_equal 100, wheel.now
     assert_equal :elapsed, wheel.register(1, 100)
     assert_equal :elapsed, wheel.register(1, 0)
@@ -149,7 +235,7 @@ class WheelTest < Minitest::Test
       assert_raises(TypeError) { wheel.tick(1, 1, value) }
       assert_raises(TypeError) { wheel.cancel(value) }
       assert_raises(TypeError) { wheel.deadline(value) }
-      assert_raises(TypeError) { WheelMachines::Wheel.starting_at(value) }
+      assert_raises(TypeError) { WheelMachines::Wheel.starting_at(0, value) }
     end
     [-1, 2**64].each do |n|
       assert_raises(RangeError) { wheel.register(n, 10) }
@@ -175,7 +261,7 @@ class WheelTest < Minitest::Test
   def test_gc_stress_at_the_u64_boundary
     previous = GC.stress
     GC.stress = true
-    wheel = WheelMachines::Wheel.starting_at(MAX - 1)
+    wheel = WheelMachines::Wheel.starting_at(0, MAX - 1)
     wheel.register(MAX, MAX)
     drain = wheel.tick(MAX, MAX, MAX)
     GC.compact

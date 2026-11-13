@@ -1,7 +1,11 @@
 use std::vec::Vec;
 
+use periscope_machines::{SEQUENCE_MAX, scoped, sequence_of};
+
 use super::*;
-use crate::test_support::{Rng, drain_ids, registered, ticked};
+use crate::test_support::{Rng, drain_ids, registered, resumed, ticked};
+
+mod scope;
 
 const BLANK: Due<u64> = Due::new(0, 0);
 
@@ -53,19 +57,16 @@ fn full_wheels_refuse_and_stale_handles_never_touch_a_reused_entry() {
     assert_eq!(drain_ids(&mut wheel), [2]);
     let before = wheel.clone();
     assert_eq!(wheel.cancel(second), Err(Refusal::Stale));
-    let foreign = Handle {
-        slot: 9,
-        generation: 1,
-    };
-    assert_eq!(wheel.cancel(foreign), Err(Refusal::Stale));
-    assert_eq!(wheel.deadline(foreign), None);
+    let beyond = Handle { slot: 9, key: 1 };
+    assert_eq!(wheel.cancel(beyond), Err(Refusal::Stale));
+    assert_eq!(wheel.deadline(beyond), None);
     assert_eq!(wheel, before);
     assert_eq!(Wheel::<u64, 0>::new().register(1, 1), Err(Refusal::Full));
 }
 
 #[test]
 fn refusals_leave_the_wheel_untouched() {
-    let mut wheel = Wheel::<u64, 4>::starting_at(100);
+    let mut wheel = Wheel::<u64, 4>::starting_at(0, 100);
     registered(wheel.register(1, 150));
     let before = wheel.clone();
     assert_eq!(wheel.advance(99), Err(Refusal::Regressed { now: 100 }));
@@ -82,10 +83,10 @@ fn refusals_leave_the_wheel_untouched() {
     assert_eq!(wheel, before);
     assert_eq!(wheel.advance(100), Ok(()));
     assert_eq!(wheel.now(), 100);
-    wheel.generation = u64::MAX;
-    let before = wheel.clone();
-    assert_eq!(wheel.register(2, 101), Err(Refusal::Exhausted));
-    assert_eq!(wheel, before);
+    let mut spent = resumed::<4>(0, SEQUENCE_MAX, 100);
+    let before = spent.clone();
+    assert_eq!(spent.register(2, 101), Err(Refusal::Exhausted));
+    assert_eq!(spent, before);
 }
 
 #[test]
@@ -122,7 +123,7 @@ fn the_whole_u64_range_is_indexed() {
     assert_eq!(drain_ids(&mut wheel), [1]);
     assert_eq!(wheel.next_wake(), None);
     assert_eq!(wheel.register(5, u64::MAX), Err(Refusal::Elapsed));
-    let mut late = Wheel::<u64, 1>::starting_at(u64::MAX - 1);
+    let mut late = Wheel::<u64, 1>::starting_at(0, u64::MAX - 1);
     registered(late.register(9, u64::MAX));
     assert_eq!(late.advance(u64::MAX), Ok(()));
     assert_eq!(drain_ids(&mut late), [9]);
@@ -240,6 +241,23 @@ impl Model {
         due
     }
 
+    /// Cancel a handle issued earlier, or its twin from another wheel's scope.
+    fn cancel<const N: usize>(&mut self, rng: &mut Rng, wheel: &mut Wheel<u64, N>) {
+        let mut handle = self.issued[rng.pick(self.issued.len())];
+        if rng.below(4) == 0 {
+            // Same entry, same sequence number, another scope.
+            handle.key = scoped(wheel.scope().wrapping_add(1), sequence_of(handle.key));
+            assert_eq!(wheel.deadline(handle), None);
+        }
+        let position = self.live.iter().position(|e| e.3 == handle);
+        let expected = position
+            .map(|at| self.live.swap_remove(at).2)
+            .ok_or(Refusal::Stale);
+        let before = wheel.clone();
+        assert_eq!(wheel.cancel(handle), expected);
+        assert!(expected.is_ok() || *wheel == before);
+    }
+
     fn check<const N: usize>(&self, wheel: &Wheel<u64, N>) {
         assert_eq!(wheel.len(), self.live.len());
         assert_eq!(wheel.now(), self.now);
@@ -254,9 +272,9 @@ impl Model {
     }
 }
 
-fn run_against_model<const N: usize>(seed: u64, start: u64, steps: usize) {
+fn run_against_model<const N: usize>(seed: u64, scope: u16, start: u64, steps: usize) {
     let mut rng = Rng(seed);
-    let mut wheel = Wheel::<u64, N>::starting_at(start);
+    let mut wheel = Wheel::<u64, N>::starting_at(scope, start);
     let mut model = Model {
         now: start,
         live: Vec::new(),
@@ -292,16 +310,7 @@ fn run_against_model<const N: usize>(seed: u64, start: u64, steps: usize) {
                     assert_eq!(wheel, before);
                 }
             }
-            4 if !model.issued.is_empty() => {
-                let handle = model.issued[rng.pick(model.issued.len())];
-                let position = model.live.iter().position(|e| e.3 == handle);
-                let expected = position
-                    .map(|at| model.live.swap_remove(at).2)
-                    .ok_or(Refusal::Stale);
-                let before = wheel.clone();
-                assert_eq!(wheel.cancel(handle), expected);
-                assert!(expected.is_ok() || wheel == before);
-            }
+            4 if !model.issued.is_empty() => model.cancel(&mut rng, &mut wheel),
             5 | 6 => {
                 let target = match rng.below(6) {
                     0 => model.now.saturating_sub(rng.below(3)),
@@ -359,9 +368,10 @@ fn run_against_model<const N: usize>(seed: u64, start: u64, steps: usize) {
 #[test]
 fn randomized_runs_match_the_naive_model() {
     for seed in 0..40 {
-        run_against_model::<24>(seed, 0, 4_000);
-        run_against_model::<5>(seed ^ 0xA5A5, Rng(seed).next() >> 8, 4_000);
-        run_against_model::<24>(seed ^ 0x5A5A, u64::MAX - Rng(seed).below(1 << 20), 4_000);
+        run_against_model::<24>(seed, 0, 0, 4_000);
+        run_against_model::<5>(seed ^ 0xA5A5, 0x4236, Rng(seed).next() >> 8, 4_000);
+        let late = u64::MAX - Rng(seed).below(1 << 20);
+        run_against_model::<24>(seed ^ 0x5A5A, u16::MAX, late, 4_000);
     }
 }
 
