@@ -44,7 +44,11 @@ pub struct Regressed {
 }
 
 /// One due registration: the caller's id and the deadline it was registered with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Due::default()` (for `I: Default`) is a placeholder for pre-filling a
+/// drain buffer: its deadline is 0, which is always [`Refusal::Elapsed`], so
+/// the wheel never emits it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Due<I> {
     /// Caller-supplied identifier.
     pub id: I,
@@ -53,7 +57,8 @@ pub struct Due<I> {
 }
 
 impl<I> Due<I> {
-    /// Build a value, typically to pre-fill a drain buffer.
+    /// Build a value, typically to compare against a drained one or to
+    /// pre-fill a drain buffer when `I` has no `Default`.
     #[must_use]
     pub const fn new(id: I, deadline: u64) -> Self {
         Self { id, deadline }

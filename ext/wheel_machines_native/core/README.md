@@ -32,6 +32,12 @@ queued: the caller already knows it is due. This in-memory index has no
 persistence and no wire format; handles are scoped to one wheel lifetime. The
 slot table costs 704 `usize` words regardless of `N`.
 
+`drain` and `tick` write the first `emitted` entries of `out` and leave the
+rest untouched. `Due<I>` implements `Default` when `I` does, so the buffer is
+`[Due::default(); N]`; the default is a placeholder the wheel never emits,
+because a deadline of 0 is always refused. The wheel itself asks nothing of
+`I` beyond `Copy`; for an id without `Default`, pre-fill with `Due::new`.
+
 ```rust
 use wheel_machines::{Due, Refusal, Status, Wheel};
 
@@ -41,7 +47,7 @@ let _retry = wheel.register(8, 90).expect("room for two");
 assert_eq!(wheel.register(9, 0), Err(Refusal::Elapsed));
 assert_eq!(wheel.next_wake(), Some(64));
 
-let mut out = [Due::new(0, 0); 4];
+let mut out = [Due::default(); 4];
 let drain = wheel.tick(100, 16, &mut out).expect("time moved forward");
 assert_eq!((drain.emitted, drain.cascaded, drain.status), (1, 1, Status::CaughtUp));
 assert_eq!(out[0], Due::new(8, 90));

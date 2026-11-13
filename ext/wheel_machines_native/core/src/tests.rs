@@ -346,3 +346,26 @@ fn randomized_runs_match_the_naive_model() {
         run_against_model::<24>(seed ^ 0x5A5A, u64::MAX - Rng(seed).below(1 << 20), 4_000);
     }
 }
+
+#[test]
+fn a_default_buffer_needs_no_invented_id() {
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    enum Job {
+        #[default]
+        Idle,
+        Renew,
+        Expire,
+    }
+    let mut wheel = Wheel::<Job, 4>::new();
+    registered(wheel.register(Job::Expire, 9));
+    registered(wheel.register(Job::Renew, 3));
+    let mut out = [Due::<Job>::default(); 4];
+    assert_eq!(out[0], Due::new(Job::Idle, 0));
+    assert_eq!(wheel.drain(8, &mut out).emitted, 0);
+    assert_eq!(ticked(wheel.tick(9, 8, &mut out)).emitted, 2);
+    assert_eq!(
+        out[..2],
+        [Due::new(Job::Renew, 3), Due::new(Job::Expire, 9)]
+    );
+    assert_eq!(out[2..], [Due::default(); 2]);
+}

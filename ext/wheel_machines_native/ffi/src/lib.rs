@@ -129,7 +129,7 @@ impl Wheel {
     /// the borrow before any Ruby object is built.
     fn drain_core(&self, budget: Number, limit: Number) -> (Drain, Vec<Due<u64>>) {
         let mut core = self.core.borrow_mut();
-        let mut due = vec![Due::new(0, 0); limit.count().min(core.len())];
+        let mut due = vec![Due::default(); limit.count().min(core.len())];
         let drain = core.drain(budget.count(), &mut due);
         due.truncate(drain.emitted);
         (drain, due)
