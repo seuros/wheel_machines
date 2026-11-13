@@ -8,8 +8,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("WheelMachines")?;
     module.const_set("CAPACITY", CAPACITY)?;
     module.const_set("MAX_CASCADES", MAX_CASCADES)?;
-    let timer = module.define_class("Timer", ruby.class_object())?;
-    timer.undef_default_alloc_func();
+    let handle = module.define_class("Handle", ruby.class_object())?;
+    handle.undef_default_alloc_func();
     let class = module.define_class("Wheel", ruby.class_object())?;
     class.undef_default_alloc_func();
     class.define_singleton_method("new", function!(Wheel::new, 0))?;

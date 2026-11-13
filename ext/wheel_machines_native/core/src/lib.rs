@@ -4,6 +4,8 @@
 #[cfg(test)]
 extern crate std;
 
+use core::fmt;
+
 /// Wheel levels; eleven six-bit digits cover every `u64` tick.
 const LEVELS: usize = 11;
 /// Slots per level.
@@ -23,9 +25,15 @@ pub struct Handle {
     generation: u64,
 }
 
-/// Why [`Wheel::register`] left the wheel untouched.
+/// Why a call was refused. A refused call changes nothing: not the tick, not
+/// a registration, not a generation.
+///
+/// This is the crate's one refusal type. [`Wheel::register`] answers
+/// [`Elapsed`](Self::Elapsed), [`Full`](Self::Full) or
+/// [`Exhausted`](Self::Exhausted); [`Wheel::cancel`] answers
+/// [`Stale`](Self::Stale); [`Wheel::advance`] and [`Wheel::tick`] answer
+/// [`Regressed`](Self::Regressed). [`Wheel::drain`] never refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Refusal {
     /// The deadline is at or before the wheel's tick: it is due now, and the
     /// caller already knows it.
@@ -34,14 +42,29 @@ pub enum Refusal {
     Full,
     /// The generation space is spent; no further handle can be issued.
     Exhausted,
+    /// The tick is earlier than the one the wheel already holds.
+    Regressed {
+        /// The tick the wheel holds.
+        now: u64,
+    },
+    /// The handle does not name a live registration: it was already cancelled
+    /// or drained, its entry was reused, or it came from another wheel.
+    Stale,
 }
 
-/// A tick earlier than the one the wheel already holds; the wheel is unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Regressed {
-    /// The tick the wheel holds.
-    pub now: u64,
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Elapsed => f.write_str("deadline is not after the wheel's tick"),
+            Self::Full => f.write_str("every entry is in use"),
+            Self::Exhausted => f.write_str("generation space exhausted"),
+            Self::Regressed { now } => write!(f, "tick is earlier than the wheel's tick {now}"),
+            Self::Stale => f.write_str("handle does not name a live registration"),
+        }
+    }
 }
+
+impl core::error::Error for Refusal {}
 
 /// One due registration: the caller's id and the deadline it was registered with.
 ///
@@ -67,7 +90,6 @@ impl<I> Due<I> {
 
 /// Why a drain call returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Status {
     /// Every id due at the wheel's tick has been emitted; nothing is left to do
     /// until the tick advances.
@@ -225,7 +247,7 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
         let (level, slot) = self.next_slot()?;
         let start = match self.cascade {
             Some((level, slot)) if self.heads[level][slot] != NIL => self.elapsed,
-            _ => slot_start(self.elapsed, level, slot),
+            Some(_) | None => slot_start(self.elapsed, level, slot),
         };
         Some(start.max(self.now))
     }
@@ -262,7 +284,7 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
             Some((level, slot)) if level_of(self.elapsed, deadline) < level => {
                 self.push_back(level, slot, index);
             }
-            _ => self.settle(index),
+            Some(_) | None => self.settle(index),
         }
         Ok(Handle {
             slot: index,
@@ -271,22 +293,27 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
     }
 
     /// Remove a registration that has not been emitted, returning its id.
-    /// `None` (and no change) for a handle that is stale, already drained,
-    /// already cancelled, or out of range.
-    pub fn cancel(&mut self, handle: Handle) -> Option<I> {
-        let index = self.lookup(handle)?;
-        self.release(index).map(|due| due.id)
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::Stale`] for a handle that does not name a live registration:
+    /// already cancelled, already drained, reused or out of range. The wheel
+    /// is unchanged.
+    pub fn cancel(&mut self, handle: Handle) -> Result<I, Refusal> {
+        let index = self.lookup(handle).ok_or(Refusal::Stale)?;
+        let due = self.release(index).ok_or(Refusal::Stale)?;
+        Ok(due.id)
     }
 
     /// Move the wheel's tick forward. Emits nothing; call [`Wheel::drain`].
     ///
     /// # Errors
     ///
-    /// [`Regressed`] when `now` is earlier than the tick already held; the
-    /// wheel is unchanged. Repeating the current tick is accepted.
-    pub const fn advance(&mut self, now: u64) -> Result<(), Regressed> {
+    /// [`Refusal::Regressed`] when `now` is earlier than the tick already
+    /// held; the wheel is unchanged. Repeating the current tick is accepted.
+    pub const fn advance(&mut self, now: u64) -> Result<(), Refusal> {
         if now < self.now {
-            return Err(Regressed { now: self.now });
+            return Err(Refusal::Regressed { now: self.now });
         }
         self.now = now;
         Ok(())
@@ -359,14 +386,10 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
     ///
     /// # Errors
     ///
-    /// [`Regressed`] when `now` is earlier than the tick already held; nothing
-    /// is drained and the wheel is unchanged.
-    pub fn tick(
-        &mut self,
-        now: u64,
-        budget: usize,
-        out: &mut [Due<I>],
-    ) -> Result<Drain, Regressed> {
+    /// [`Refusal::Regressed`] when `now` is earlier than the tick already
+    /// held; nothing is drained, `out` is not written and the wheel is
+    /// unchanged.
+    pub fn tick(&mut self, now: u64, budget: usize, out: &mut [Due<I>]) -> Result<Drain, Refusal> {
         self.advance(now)?;
         Ok(self.drain(budget, out))
     }

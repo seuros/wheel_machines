@@ -37,25 +37,29 @@ fn full_wheels_refuse_and_stale_handles_never_touch_a_reused_entry() {
     let before = wheel.clone();
     assert_eq!(wheel.register(3, 10), Err(Refusal::Full));
     assert_eq!(wheel, before);
-    assert_eq!(wheel.cancel(first), Some(1));
-    assert_eq!(wheel.cancel(first), None);
+    assert_eq!(wheel.cancel(first), Ok(1));
+    let before = wheel.clone();
+    assert_eq!(wheel.cancel(first), Err(Refusal::Stale));
+    assert_eq!(wheel, before);
     assert_eq!(wheel.deadline(first), None);
     let reused = registered(wheel.register(3, 20));
     assert_eq!(reused.slot, first.slot);
     assert_ne!(reused, first);
     let before = wheel.clone();
-    assert_eq!(wheel.cancel(first), None);
+    assert_eq!(wheel.cancel(first), Err(Refusal::Stale));
     assert_eq!(wheel, before);
     assert_eq!(wheel.deadline(reused), Some(20));
     assert_eq!(wheel.advance(10), Ok(()));
     assert_eq!(drain_ids(&mut wheel), [2]);
-    assert_eq!(wheel.cancel(second), None);
+    let before = wheel.clone();
+    assert_eq!(wheel.cancel(second), Err(Refusal::Stale));
     let foreign = Handle {
         slot: 9,
         generation: 1,
     };
-    assert_eq!(wheel.cancel(foreign), None);
+    assert_eq!(wheel.cancel(foreign), Err(Refusal::Stale));
     assert_eq!(wheel.deadline(foreign), None);
+    assert_eq!(wheel, before);
     assert_eq!(Wheel::<u64, 0>::new().register(1, 1), Err(Refusal::Full));
 }
 
@@ -64,11 +68,15 @@ fn refusals_leave_the_wheel_untouched() {
     let mut wheel = Wheel::<u64, 4>::starting_at(100);
     registered(wheel.register(1, 150));
     let before = wheel.clone();
-    assert_eq!(wheel.advance(99), Err(Regressed { now: 100 }));
+    assert_eq!(wheel.advance(99), Err(Refusal::Regressed { now: 100 }));
+    assert_eq!(wheel, before);
+    let mut out = [Due::new(77, 77); 2];
     assert_eq!(
-        wheel.tick(0, 64, &mut [BLANK; 1]),
-        Err(Regressed { now: 100 })
+        wheel.tick(0, 64, &mut out),
+        Err(Refusal::Regressed { now: 100 })
     );
+    assert_eq!(wheel, before);
+    assert_eq!(out, [Due::new(77, 77); 2]);
     assert_eq!(wheel.register(2, 100), Err(Refusal::Elapsed));
     assert_eq!(wheel.register(2, 0), Err(Refusal::Elapsed));
     assert_eq!(wheel, before);
@@ -163,8 +171,8 @@ fn a_full_buffer_or_spent_budget_resumes_where_it_stopped() {
     assert_eq!((drain.emitted, drain.status), (2, Status::OutputFull));
     assert_eq!(out.map(|due| due.id), [0, 1]);
     assert_eq!(wheel.next_wake(), Some(9));
-    assert_eq!(wheel.cancel(handles[0]), None);
-    assert_eq!(wheel.cancel(handles[3]), Some(3));
+    assert_eq!(wheel.cancel(handles[0]), Err(Refusal::Stale));
+    assert_eq!(wheel.cancel(handles[3]), Ok(3));
     assert_eq!(wheel.advance(500), Ok(()));
     registered(wheel.register(6, 501));
     let drain = wheel.drain(1, &mut out);
@@ -287,10 +295,12 @@ fn run_against_model<const N: usize>(seed: u64, start: u64, steps: usize) {
             4 if !model.issued.is_empty() => {
                 let handle = model.issued[rng.pick(model.issued.len())];
                 let position = model.live.iter().position(|e| e.3 == handle);
-                let expected = position.map(|at| model.live.swap_remove(at).2);
+                let expected = position
+                    .map(|at| model.live.swap_remove(at).2)
+                    .ok_or(Refusal::Stale);
                 let before = wheel.clone();
                 assert_eq!(wheel.cancel(handle), expected);
-                assert!(expected.is_some() || wheel == before);
+                assert!(expected.is_ok() || wheel == before);
             }
             5 | 6 => {
                 let target = match rng.below(6) {
@@ -302,13 +312,21 @@ fn run_against_model<const N: usize>(seed: u64, start: u64, steps: usize) {
                     3 => model.now.saturating_add(rng.below(100)),
                     _ => model.now.saturating_add(rng.span()),
                 };
-                let expected = if target < model.now {
-                    Err(Regressed { now: model.now })
+                let before = wheel.clone();
+                if target < model.now {
+                    let refused = Err(Refusal::Regressed { now: model.now });
+                    if rng.below(2) == 0 {
+                        assert_eq!(wheel.advance(target), refused);
+                    } else {
+                        let mut out = [BLANK; 3];
+                        assert_eq!(wheel.tick(target, 6, &mut out).map(|_| ()), refused);
+                        assert_eq!(out, [BLANK; 3]);
+                    }
+                    assert_eq!(wheel, before);
                 } else {
                     model.now = target;
-                    Ok(())
-                };
-                assert_eq!(wheel.advance(target), expected);
+                    assert_eq!(wheel.advance(target), Ok(()));
+                }
             }
             _ => {
                 let budget = rng.pick(6);
@@ -368,4 +386,18 @@ fn a_default_buffer_needs_no_invented_id() {
         [Due::new(Job::Renew, 3), Due::new(Job::Expire, 9)]
     );
     assert_eq!(out[2..], [Due::default(); 2]);
+}
+
+#[test]
+fn refusals_describe_themselves() {
+    use std::string::ToString;
+    let error: &dyn core::error::Error = &Refusal::Regressed { now: 100 };
+    assert_eq!(
+        error.to_string(),
+        "tick is earlier than the wheel's tick 100"
+    );
+    assert_eq!(
+        Refusal::Stale.to_string(),
+        "handle does not name a live registration"
+    );
 }

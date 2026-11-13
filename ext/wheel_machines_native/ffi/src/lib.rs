@@ -32,8 +32,19 @@ impl TryConvert for Number {
     }
 }
 
-#[magnus::wrap(class = "WheelMachines::Timer", free_immediately, size)]
-struct Timer {
+const fn refusal(refusal: Refusal) -> &'static str {
+    match refusal {
+        Refusal::Elapsed => "elapsed",
+        Refusal::Full => "full",
+        Refusal::Exhausted => "exhausted",
+        Refusal::Regressed { .. } => "regressed",
+        Refusal::Stale => "stale",
+    }
+}
+
+/// `WheelMachines::Handle`: the core's `Handle`, tied to the wheel that issued it.
+#[magnus::wrap(class = "WheelMachines::Handle", free_immediately, size)]
+struct Issued {
     owner: Arc<()>,
     handle: Handle,
 }
@@ -66,41 +77,41 @@ impl Wheel {
         let outcome = this.core.borrow_mut().register(id.0, deadline.0);
         Ok(match outcome {
             Ok(handle) => ruby
-                .obj_wrap(Timer {
+                .obj_wrap(Issued {
                     owner: Arc::clone(&this.owner),
                     handle,
                 })
                 .as_value(),
-            Err(Refusal::Elapsed) => ruby.to_symbol("elapsed").as_value(),
-            Err(Refusal::Full) => ruby.to_symbol("full").as_value(),
-            Err(_) => ruby.to_symbol("exhausted").as_value(),
+            Err(refused) => ruby.to_symbol(refusal(refused)).as_value(),
         })
     }
 
-    fn cancel(this: Obj<Self>, timer: Obj<Timer>) -> Result<Option<u64>, Error> {
+    /// A handle issued by another wheel is stale here, whatever its slot says.
+    fn cancel(ruby: &Ruby, this: Obj<Self>, issued: Obj<Issued>) -> Result<Value, Error> {
         this.check_frozen()?;
-        if !Arc::ptr_eq(&this.owner, &timer.owner) {
-            return Ok(None);
-        }
-        Ok(this.core.borrow_mut().cancel(timer.handle))
+        let outcome = if Arc::ptr_eq(&this.owner, &issued.owner) {
+            this.core.borrow_mut().cancel(issued.handle)
+        } else {
+            Err(Refusal::Stale)
+        };
+        Ok(match outcome {
+            Ok(id) => ruby.integer_from_u64(id).as_value(),
+            Err(refused) => ruby.to_symbol(refusal(refused)).as_value(),
+        })
     }
 
-    fn deadline(&self, timer: Obj<Timer>) -> Option<u64> {
-        if !Arc::ptr_eq(&self.owner, &timer.owner) {
+    fn deadline(&self, issued: Obj<Issued>) -> Option<u64> {
+        if !Arc::ptr_eq(&self.owner, &issued.owner) {
             return None;
         }
-        self.core.borrow().deadline(timer.handle)
+        self.core.borrow().deadline(issued.handle)
     }
 
     fn advance(ruby: &Ruby, this: Obj<Self>, now: Number) -> Result<Value, Error> {
         this.check_frozen()?;
         let outcome = this.core.borrow_mut().advance(now.0);
         Ok(ruby
-            .to_symbol(if outcome.is_ok() {
-                "advanced"
-            } else {
-                "regressed"
-            })
+            .to_symbol(outcome.map_or_else(refusal, |()| "advanced"))
             .as_value())
     }
 
@@ -118,8 +129,8 @@ impl Wheel {
         limit: Number,
     ) -> Result<Value, Error> {
         this.check_frozen()?;
-        if this.core.borrow_mut().advance(now.0).is_err() {
-            return Ok(ruby.to_symbol("regressed").as_value());
+        if let Err(refused) = this.core.borrow_mut().advance(now.0) {
+            return Ok(ruby.to_symbol(refusal(refused)).as_value());
         }
         let (drain, due) = this.drain_core(budget, limit);
         report(ruby, drain, &due)
@@ -170,7 +181,7 @@ fn report(ruby: &Ruby, drain: Drain, due: &[Due<u64>]) -> Result<Value, Error> {
     let status = ruby.to_symbol(match drain.status {
         Status::CaughtUp => "caught_up",
         Status::OutputFull => "output_full",
-        _ => "budget_spent",
+        Status::BudgetSpent => "budget_spent",
     });
     drain_class.funcall("new", (rows, drain.cascaded, status))
 }

@@ -10,7 +10,7 @@ class WheelTest < Minitest::Test
   def test_due_ids_in_deadline_then_registration_order
     wheel = WheelMachines::Wheel.new
     [[1, 70], [2, 5], [3, 70], [4, 4096], [5, 5]].each do |id, deadline|
-      assert_instance_of WheelMachines::Timer, wheel.register(id, deadline)
+      assert_instance_of WheelMachines::Handle, wheel.register(id, deadline)
     end
     assert_equal 5, wheel.size
     refute_predicate wheel, :empty?
@@ -38,50 +38,56 @@ class WheelTest < Minitest::Test
     assert_predicate drain, :frozen?
     assert_predicate drain.due, :frozen?
     assert_equal 1, drain.work
+    assert_equal 1, drain.emitted
     assert_equal 0, drain.cascaded
+    assert_equal %i[due cascaded status], WheelMachines::Drain.members
+    assert_equal [0, 0], [wheel.drain(8, 8).emitted, wheel.drain(8, 8).work]
   end
 
-  def test_cancel_deadline_and_stale_timers
+  def test_cancel_deadline_and_stale_handles
     wheel = WheelMachines::Wheel.new
-    timer = wheel.register(7, 100)
-    assert_equal 100, wheel.deadline(timer)
-    assert_equal 7, wheel.cancel(timer)
-    assert_nil wheel.cancel(timer)
-    assert_nil wheel.deadline(timer)
+    handle = wheel.register(7, 100)
+    assert_equal 100, wheel.deadline(handle)
+    assert_equal 7, wheel.cancel(handle)
+    assert_equal :stale, wheel.cancel(handle)
+    assert_nil wheel.deadline(handle)
     replacement = wheel.register(8, 50)
-    assert_nil wheel.cancel(timer)
+    assert_equal :stale, wheel.cancel(handle)
+    assert_equal [1, 50], [wheel.size, wheel.deadline(replacement)]
     drained = wheel.register(9, 10)
     assert_equal [9], ids(wheel.tick(10, 8, 8))
-    assert_nil wheel.cancel(drained)
+    assert_equal :stale, wheel.cancel(drained)
+    assert_equal 1, wheel.size
     assert_equal 8, wheel.cancel(replacement)
   end
 
   def test_opaque_owner_lifetime_and_gc
     a = WheelMachines::Wheel.new
     b = WheelMachines::Wheel.new
-    timer = a.register(1, 10)
+    handle = a.register(1, 10)
     b.register(1, 10)
-    assert_nil b.cancel(timer)
-    assert_nil b.deadline(timer)
+    assert_equal :stale, b.cancel(handle)
+    assert_nil b.deadline(handle)
     assert_equal 1, b.size
-    assert_raises(TypeError) { WheelMachines::Timer.allocate }
+    assert_raises(TypeError) { WheelMachines::Handle.allocate }
     assert_raises(TypeError) { WheelMachines::Wheel.allocate }
-    assert_raises(TypeError) { timer.dup }
+    assert_raises(TypeError) { handle.dup }
     a = nil
     GC.start
-    assert_nil WheelMachines::Wheel.new.cancel(timer)
+    assert_equal :stale, WheelMachines::Wheel.new.cancel(handle)
   end
 
   def test_capacity_refuses_without_evicting
     wheel = WheelMachines::Wheel.new
     assert_equal 1024, WheelMachines::CAPACITY
     assert_equal WheelMachines::CAPACITY, wheel.capacity
-    timers = WheelMachines::CAPACITY.times.map { |i| wheel.register(i, 100 + i) }
+    handles = WheelMachines::CAPACITY.times.map { |i| wheel.register(i, 100 + i) }
     assert_equal :full, wheel.register(5000, 100)
     assert_equal WheelMachines::CAPACITY, wheel.size
-    assert_equal 0, wheel.cancel(timers.first)
-    assert_instance_of WheelMachines::Timer, wheel.register(5000, 100)
-    assert_nil wheel.cancel(timers.first)
+    assert_equal 0, wheel.cancel(handles.first)
+    assert_instance_of WheelMachines::Handle, wheel.register(5000, 100)
+    assert_equal :stale, wheel.cancel(handles.first)
+    assert_equal WheelMachines::CAPACITY, wheel.size
   end
 
   def test_time_only_moves_forward_and_elapsed_deadlines_are_refused
@@ -156,14 +162,14 @@ class WheelTest < Minitest::Test
 
   def test_freeze_guards
     wheel = WheelMachines::Wheel.new
-    timer = wheel.register(1, 10)
+    handle = wheel.register(1, 10)
     wheel.freeze
     assert_raises(FrozenError) { wheel.register(2, 10) }
-    assert_raises(FrozenError) { wheel.cancel(timer) }
+    assert_raises(FrozenError) { wheel.cancel(handle) }
     assert_raises(FrozenError) { wheel.advance(1) }
     assert_raises(FrozenError) { wheel.drain(1, 1) }
     assert_raises(FrozenError) { wheel.tick(1, 1, 1) }
-    assert_equal [1, 0, 10, 10], [wheel.size, wheel.now, wheel.deadline(timer), wheel.next_wake]
+    assert_equal [1, 0, 10, 10], [wheel.size, wheel.now, wheel.deadline(handle), wheel.next_wake]
   end
 
   def test_gc_stress_at_the_u64_boundary

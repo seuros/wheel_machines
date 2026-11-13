@@ -11,17 +11,21 @@ gem 'wheel_machines'
 ```
 
 ```ruby
-wheel = WheelMachines::Wheel.starting_at(clock.now_ms)
+# The tick unit is yours. Here one tick is a millisecond of the monotonic clock.
+TICK = 1_000_000
+def tick_now = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond) / TICK
+
+wheel = WheelMachines::Wheel.starting_at(tick_now)
 
 # A lease that must be renewed within 30 seconds.
-timer = wheel.register(lease.id, clock.now_ms + 30_000)
-raise "wheel refused #{lease.id}: #{timer}" if timer.is_a?(Symbol)
+handle = wheel.register(lease.id, tick_now + 30_000)
+raise "wheel refused #{lease.id}: #{handle}" if handle.is_a?(Symbol)
 
 # Renewed in time? Drop the old deadline.
-wheel.cancel(timer)
+wheel.cancel(handle)
 
 # In your own loop, on your own schedule:
-drain = wheel.tick(clock.now_ms, 256, 64)   # now, work budget, max ids
+drain = wheel.tick(tick_now, 256, 64)   # now, work budget, max ids
 drain.due.each { |due| expire_lease(due.id) }
 reschedule_soon unless drain.caught_up?
 ```
@@ -62,12 +66,12 @@ Each registration is in one of these states:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> waiting: register, returns a Timer
+    [*] --> waiting: register, returns a Handle
     waiting --> waiting: tick enters its range, moved to a finer wheel (cascade)
     waiting --> due: advance reaches its deadline
-    waiting --> [*]: cancel(timer), returns the id
+    waiting --> [*]: cancel(handle), returns the id
     due --> [*]: drain emits the id
-    due --> [*]: cancel(timer), returns the id
+    due --> [*]: cancel(handle), returns the id
 ```
 
 And the afternoon a lease was renewed once and then forgotten:
@@ -79,12 +83,12 @@ sequenceDiagram
     participant L as Lease table
 
     A->>W: register(42, now + 30s)
-    W-->>A: Timer
+    W-->>A: Handle
     Note over A: renewed at 20s
-    A->>W: cancel(timer)
+    A->>W: cancel(handle)
     W-->>A: 42
     A->>W: register(42, now + 30s)
-    W-->>A: Timer
+    W-->>A: Handle
 
     A->>W: tick(now, 256, 64)
     W-->>A: Drain(due: [], status: :caught_up)
@@ -102,13 +106,13 @@ sequenceDiagram
 ```ruby
 wheel = WheelMachines::Wheel.new          # tick starts at 0
 
-timer = wheel.register(42, 5_000)         # id 42, due at tick 5000
-timer.class                               # => WheelMachines::Timer
-wheel.deadline(timer)                     # => 5000
+handle = wheel.register(42, 5_000)        # id 42, due at tick 5000
+handle.class                              # => WheelMachines::Handle
+wheel.deadline(handle)                    # => 5000
 wheel.size                                # => 1
 ```
 
-A `Timer` is your handle on that one registration. The same id may be registered as often as you like. Each registration is its own entry with its own handle.
+A `Handle` names that one registration. The same id may be registered as often as you like. Each registration is its own entry with its own handle.
 
 A deadline that isn't in the future is refused, not queued:
 
@@ -121,12 +125,12 @@ It's due already and you're holding it. Handle it.
 ### Cancel
 
 ```ruby
-wheel.cancel(timer)        # => 42
-wheel.cancel(timer)        # => nil, already gone
-wheel.deadline(timer)      # => nil
+wheel.cancel(handle)       # => 42
+wheel.cancel(handle)       # => :stale, already gone
+wheel.deadline(handle)     # => nil
 ```
 
-Cancel returns the id once, and `nil` after that. A cancelled id is never emitted. An id that is due but hasn't been drained yet can still be cancelled. Once drained, its handle is dead.
+Cancel returns the id once, and `:stale` after that. `:stale` is the answer for any handle that names no live registration: cancelled, drained, or issued by another wheel. It changes nothing. A cancelled id is never emitted. An id that is due but hasn't been drained yet can still be cancelled. Once drained, its handle is dead.
 
 ### Advance
 
@@ -190,7 +194,7 @@ wheel.register(1, 5_000)
 
 drain = wheel.tick(5_000, 64, 64)
 drain.cascaded                 # => 2
-drain.due.size                 # => 1
+drain.emitted                  # => 1, the same as drain.due.size
 drain.work                     # => 3
 ```
 
@@ -214,11 +218,11 @@ The wheel holds 1024 registrations at a time. Past that, `register` says `:full`
 ```ruby
 wheel = WheelMachines::Wheel.new
 wheel.capacity                                         # => 1024
-timers = 1024.times.map { |i| wheel.register(i, 100) }
+handles = 1024.times.map { |i| wheel.register(i, 100) }
 wheel.register(5_000, 100)                             # => :full
 
-wheel.cancel(timers.first)                             # => 0
-wheel.register(5_000, 100).class                       # => WheelMachines::Timer
+wheel.cancel(handles.first)                            # => 0
+wheel.register(5_000, 100).class                       # => WheelMachines::Handle
 ```
 
 A live registration is never evicted to make room.
@@ -234,12 +238,26 @@ wheel.now                      # => 100
 
 A tick earlier than the last one is refused and changes nothing. Repeating the current tick is fine.
 
+### What each call answers
+
+| Call | Honoured | Refused, nothing changed |
+| --- | --- | --- |
+| `register` | a `Handle` | `:elapsed`, `:full`, `:exhausted` |
+| `cancel` | the id, an Integer | `:stale` |
+| `advance` | `:advanced` | `:regressed` |
+| `tick` | a `Drain` | `:regressed` |
+| `drain` | a `Drain` | never refuses |
+| `deadline` | the tick, or `nil` for a handle that names no live registration | a query, never refuses |
+| `next_wake` | the tick, or `nil` when the wheel is empty | a query, never refuses |
+
+`:exhausted` means 2**64-1 handles have been issued by this wheel. Every refusal has its own symbol; there is no catch-all. `:regressed` is the core's `Regressed { now }`, and the tick it carries is `wheel.now`.
+
 ## The Rules of the Chronometer Tender
 
 - **Ids, ticks, budgets, and limits are Integers** in `0..2**64-1`. Floats, nil, and strings raise `TypeError`. Out of range raises `RangeError`.
 - **Every tick is reachable.** Eleven wheels cover the whole 64-bit range. No deadline is too far away.
-- **Timers belong to one wheel.** A `Timer` from one `Wheel` gets `nil` from another. Timers can't be built or copied by hand.
-- **Refusals don't raise, and don't change anything.** `:elapsed`, `:full`, `:exhausted`, `:regressed`, and `nil` are answers. Only malformed input raises.
+- **Handles belong to one wheel.** A `Handle` from one `Wheel` is `:stale` to another, and its `deadline` there is `nil`. Handles can't be built or copied by hand.
+- **Refusals don't raise, and don't change anything.** `:elapsed`, `:full`, `:exhausted`, `:regressed`, and `:stale` are answers. Only malformed input raises.
 - **Draining never moves time.** Only `advance` and `tick` do, and only to the tick you pass.
 - **Frozen means frozen.** `freeze` the wheel and `register`, `cancel`, `advance`, `drain`, and `tick` all raise `FrozenError`.
 

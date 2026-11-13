@@ -18,11 +18,15 @@ module WheelMachines
     attr_reader status: status
     def self.new: (Array[Due] due, Integer cascaded, status status) -> Drain
                 | (due: Array[Due], cascaded: Integer, status: status) -> Drain
+    # The core's `emitted`: how many entries are in `due`.
+    def emitted: () -> Integer
     def work: () -> Integer
     def caught_up?: () -> bool
   end
 
-  class Timer
+  # Mirrors the core's `Handle`: names one registration on the wheel that
+  # issued it. Opaque; it cannot be built or copied by hand.
+  class Handle
   end
 
   class Wheel
@@ -33,11 +37,19 @@ module WheelMachines
     def empty?: () -> bool
     def now: () -> Integer
     def next_wake: () -> Integer?
-    def register: (Integer id, Integer deadline) -> (Timer | :elapsed | :full | :exhausted)
-    def cancel: (Timer) -> Integer?
-    def deadline: (Timer) -> Integer?
+    # Refusals are symbols, one per core variant, and a refused call changes
+    # nothing. `Refusal::Regressed { now }` is `:regressed`; the tick it
+    # carries is `now`.
+    # Honoured: a Handle. Refused: :elapsed, :full, :exhausted.
+    def register: (Integer id, Integer deadline) -> (Handle | :elapsed | :full | :exhausted)
+    # Honoured: the id that was registered. Refused: :stale.
+    def cancel: (Handle) -> (Integer | :stale)
+    def deadline: (Handle) -> Integer?
+    # Honoured: :advanced (repeating the current tick included). Refused: :regressed.
     def advance: (Integer now) -> (:advanced | :regressed)
+    # Never refuses.
     def drain: (Integer budget, Integer limit) -> Drain
+    # Honoured: a Drain. Refused: :regressed.
     def tick: (Integer now, Integer budget, Integer limit) -> (Drain | :regressed)
   end
 end

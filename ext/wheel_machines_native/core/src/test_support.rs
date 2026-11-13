@@ -2,7 +2,7 @@
 
 use std::vec::Vec;
 
-use crate::{Drain, Due, Handle, Refusal, Regressed, Wheel};
+use crate::{Drain, Due, Handle, Refusal, Wheel};
 
 /// Deterministic splitmix64 stream; the tests own their draws.
 pub struct Rng(pub u64);
@@ -39,7 +39,7 @@ pub fn registered(result: Result<Handle, Refusal>) -> Handle {
     handle
 }
 
-pub fn ticked(result: Result<Drain, Regressed>) -> Drain {
+pub fn ticked(result: Result<Drain, Refusal>) -> Drain {
     let Ok(drain) = result else {
         panic!("expected a drain, got {result:?}");
     };
