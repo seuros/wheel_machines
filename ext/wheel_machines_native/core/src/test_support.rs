@@ -12,29 +12,23 @@ pub fn resumed<const N: usize>(scope: u16, issued: u64, now: u64) -> Wheel<u64, 
     wheel
 }
 
-/// Deterministic splitmix64 stream; the tests own their draws.
-pub struct Rng(pub u64);
+/// The tests' deterministic draws.
+pub use matryona_machines::testing::SplitMix64 as Rng;
 
-impl Rng {
-    pub fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    pub fn below(&mut self, bound: u64) -> u64 {
-        self.next() % bound
-    }
-
+/// What the tests draw besides `below`.
+pub trait Draws {
     /// An index into a collection of `len` elements.
-    pub fn pick(&mut self, len: usize) -> usize {
+    fn pick(&mut self, len: usize) -> usize;
+    /// A span whose magnitude is uniform over the wheel's eleven levels.
+    fn span(&mut self) -> u64;
+}
+
+impl Draws for Rng {
+    fn pick(&mut self, len: usize) -> usize {
         usize::try_from(self.below(len as u64)).unwrap_or(0)
     }
 
-    /// A span whose magnitude is uniform over the wheel's eleven levels.
-    pub fn span(&mut self) -> u64 {
+    fn span(&mut self) -> u64 {
         let level = self.below(LEVELS as u64);
         1 + self.below(1 << (BITS as u64 * level))
     }

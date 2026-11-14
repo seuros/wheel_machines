@@ -4,7 +4,8 @@ mod values;
 
 use std::cell::RefCell;
 
-use magnus::{Error, Integer, Ruby, TryConvert, Value, prelude::*, typed_data::Obj};
+use magnus::{Error, Ruby, Value, prelude::*, typed_data::Obj};
+use matryona_machines::ruby::{exact_typed, integer, keep, symbol};
 use wheel_machines::{Drain, Due, Handle, Refusal};
 
 use crate::values::Classes;
@@ -13,55 +14,9 @@ const CAPACITY: usize = 1024;
 
 type Core = wheel_machines::Wheel<u64, CAPACITY>;
 
-#[derive(Clone, Copy)]
-pub(crate) struct Number(pub(crate) u64);
-
-impl Number {
-    /// The count as a `usize`.
-    ///
-    /// # Errors
-    ///
-    /// `RangeError` above `usize::MAX`: a count is never silently capped.
-    pub(crate) fn count(self, ruby: &Ruby, what: &'static str) -> Result<usize, Error> {
-        usize::try_from(self.0).map_err(|_| {
-            Error::new(
-                ruby.exception_range_error(),
-                format!("{what} is past usize ({})", usize::MAX),
-            )
-        })
-    }
-}
-
-/// `TypeError` unless `value` is an Integer; the range is the caller's check.
-fn integer(value: Value, expected: &'static str) -> Result<Value, Error> {
-    if Integer::from_value(value).is_none() {
-        return Err(Error::new(
-            Ruby::get_with(value).exception_type_error(),
-            expected,
-        ));
-    }
-    Ok(value)
-}
-
-impl TryConvert for Number {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        u64::try_convert(integer(value, "expected an Integer (unsigned 64-bit)")?).map(Self)
-    }
-}
-
-/// An issuer scope: an Integer in `0..=65535`.
-#[derive(Clone, Copy)]
-struct Scope(u16);
-
-impl TryConvert for Scope {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        u16::try_convert(integer(value, "expected an Integer scope (0..=65535)")?).map(Self)
-    }
-}
-
 /// A refusal as the Ruby symbol it answers.
 fn refused(ruby: &Ruby, refused: Refusal) -> Value {
-    ruby.to_symbol(refusal(refused)).as_value()
+    symbol(ruby, refusal(refused)).as_value()
 }
 
 const fn refusal(refusal: Refusal) -> &'static str {
@@ -83,6 +38,14 @@ impl Issued {
     const fn scope(&self) -> u16 {
         self.0.scope()
     }
+
+    /// The core handle `value` wraps: exactly a `WheelMachines::Handle`, a
+    /// subclass instance refused with `TypeError`.
+    fn from(ruby: &Ruby, value: Value) -> Result<Handle, Error> {
+        let class = Classes::get(ruby)?.handle.get(ruby);
+        exact_typed::<Self>(ruby, value, class, "expected a WheelMachines::Handle")
+            .map(|issued| issued.0)
+    }
 }
 
 /// Drain `core` into a buffer no larger than what can possibly be due.
@@ -103,16 +66,19 @@ impl Wheel {
         Self::build(Core::new())
     }
 
-    fn with_scope(scope: Scope) -> Self {
-        Self::build(Core::with_scope(scope.0))
+    fn with_scope(scope: Value) -> Result<Self, Error> {
+        Ok(Self::build(Core::with_scope(integer(scope, "scope")?)))
     }
 
-    fn starting_at(scope: Scope, now: Number) -> Self {
-        Self::build(Core::starting_at(scope.0, now.0))
+    fn starting_at(scope: Value, now: Value) -> Result<Self, Error> {
+        let (scope, now) = (integer(scope, "scope")?, integer(now, "now")?);
+        Ok(Self::build(Core::starting_at(scope, now)))
     }
 
-    fn resumed(ruby: &Ruby, scope: Scope, issued: Number, now: Number) -> Result<Self, Error> {
-        Core::resumed(scope.0, issued.0, now.0)
+    fn resumed(ruby: &Ruby, scope: Value, issued: Value, now: Value) -> Result<Self, Error> {
+        let scope = integer(scope, "scope")?;
+        let (issued, now) = (integer(issued, "issued")?, integer(now, "now")?);
+        Core::resumed(scope, issued, now)
             .map(Self::build)
             .ok_or_else(|| {
                 Error::new(
@@ -136,110 +102,76 @@ impl Wheel {
         self.core.borrow().issued()
     }
 
-    fn register(
-        ruby: &Ruby,
-        this: Obj<Self>,
-        id: Number,
-        deadline: Number,
-    ) -> Result<Value, Error> {
+    fn register(ruby: &Ruby, this: Obj<Self>, id: Value, deadline: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().register(id.0, deadline.0);
+        let (id, deadline) = (integer(id, "id")?, integer(deadline, "deadline")?);
+        let outcome = this.core.borrow_mut().register(id, deadline);
         Ok(match outcome {
             Ok(handle) => ruby.obj_wrap(Issued(handle)).as_value(),
             Err(refusal) => refused(ruby, refusal),
         })
     }
 
-    fn cancel(ruby: &Ruby, this: Obj<Self>, issued: Obj<Issued>) -> Result<Value, Error> {
+    fn cancel(ruby: &Ruby, this: Obj<Self>, issued: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().cancel(issued.0);
+        let handle = Issued::from(ruby, issued)?;
+        let outcome = this.core.borrow_mut().cancel(handle);
         Ok(match outcome {
             Ok(id) => ruby.integer_from_u64(id).as_value(),
             Err(refusal) => refused(ruby, refusal),
         })
     }
 
-    fn deadline(&self, issued: Obj<Issued>) -> Option<u64> {
-        self.core.borrow().deadline(issued.0)
+    fn deadline(ruby: &Ruby, this: &Self, issued: Value) -> Result<Option<u64>, Error> {
+        let handle = Issued::from(ruby, issued)?;
+        Ok(this.core.borrow().deadline(handle))
     }
 
-    fn advance(ruby: &Ruby, this: Obj<Self>, now: Number) -> Result<Value, Error> {
+    fn advance(ruby: &Ruby, this: Obj<Self>, now: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().advance(now.0);
-        Ok(ruby
-            .to_symbol(outcome.map_or_else(refusal, |()| "advanced"))
-            .as_value())
+        let now = integer(now, "now")?;
+        let outcome = this.core.borrow_mut().advance(now);
+        Ok(symbol(ruby, outcome.map_or_else(refusal, |()| "advanced")).as_value())
     }
 
-    fn drain(ruby: &Ruby, this: Obj<Self>, budget: Number, limit: Number) -> Result<Value, Error> {
+    /// The answer is built from a copy of the wheel kept only once it exists
+    /// (see [`keep`]): a raise while building leaves every due entry in it.
+    fn drain(ruby: &Ruby, this: Obj<Self>, budget: Value, limit: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let (budget, limit) = (integer(budget, "budget")?, integer(limit, "limit")?);
         // Everything that can raise happens before the core drains.
-        let (classes, budget, limit) = Self::prepare(ruby, budget, limit)?;
-        Self::on_copy(ruby, this, |core| {
-            let (drain, due) = drain_core(core, budget, limit);
-            classes.report(ruby, drain, &due)
-        })
+        let classes = Classes::get(ruby)?;
+        keep(
+            ruby,
+            this,
+            &this.core,
+            |core| drain_core(core, budget, limit),
+            |(drain, due)| classes.report(ruby, drain, &due),
+        )
     }
 
     fn tick(
         ruby: &Ruby,
         this: Obj<Self>,
-        now: Number,
-        budget: Number,
-        limit: Number,
+        now: Value,
+        budget: Value,
+        limit: Value,
     ) -> Result<Value, Error> {
         this.check_frozen()?;
+        let now = integer(now, "now")?;
+        let (budget, limit) = (integer(budget, "budget")?, integer(limit, "limit")?);
         // Everything that can raise happens before the core moves.
-        let (classes, budget, limit) = Self::prepare(ruby, budget, limit)?;
-        Self::on_copy(ruby, this, |core| {
-            if let Err(refusal) = core.advance(now.0) {
-                return Ok(refused(ruby, refusal));
-            }
-            let (drain, due) = drain_core(core, budget, limit);
-            classes.report(ruby, drain, &due)
-        })
-    }
-
-    /// The raising half of `drain` and `tick`: the classes resolved at init
-    /// and the count conversions, done before the core is touched.
-    fn prepare(
-        ruby: &Ruby,
-        budget: Number,
-        limit: Number,
-    ) -> Result<(Classes, usize, usize), Error> {
-        Ok((
-            Classes::get(ruby)?,
-            budget.count(ruby, "budget")?,
-            limit.count(ruby, "limit")?,
-        ))
-    }
-
-    /// Runs `act`, which builds the Ruby answer, on a copy of the wheel and
-    /// keeps the copy only once the answer exists: a raise while building
-    /// leaves every due entry in the wheel. Right before the store the
-    /// receiver is checked again: frozen meanwhile raises `FrozenError`,
-    /// changed meanwhile (a redefined `new` calling back in) raises
-    /// `RuntimeError`, and in both cases nothing is applied. No borrow is held
-    /// while `act` runs.
-    fn on_copy(
-        ruby: &Ruby,
-        this: Obj<Self>,
-        act: impl FnOnce(&mut Core) -> Result<Value, Error>,
-    ) -> Result<Value, Error> {
-        this.check_frozen()?;
-        let before = this.core.borrow().clone();
-        let mut after = before.clone();
-        let answer = act(&mut after)?;
-        this.check_frozen()?;
-        let mut held = this.core.borrow_mut();
-        if *held != before {
-            return Err(Error::new(
-                ruby.exception_runtime_error(),
-                "the wheel changed while the answer was built; the call was not applied",
-            ));
-        }
-        *held = after;
-        Ok(answer)
+        let classes = Classes::get(ruby)?;
+        keep(
+            ruby,
+            this,
+            &this.core,
+            |core| core.advance(now).map(|()| drain_core(core, budget, limit)),
+            |ticked| match ticked {
+                Ok((drain, due)) => classes.report(ruby, drain, &due),
+                Err(refusal) => Ok(refused(ruby, refusal)),
+            },
+        )
     }
 
     fn now(&self) -> u64 {

@@ -4,7 +4,8 @@ use std::vec::Vec;
 use periscope_machines::{SEQUENCE_MAX, scoped, sequence_of};
 
 use super::*;
-use crate::test_support::{Rng, drain_ids, honoured, resumed};
+use crate::test_support::{Draws, Rng, drain_ids, honoured, resumed};
+use matryona_machines::testing::refuses;
 
 mod scope;
 mod values;
@@ -40,29 +41,21 @@ fn full_wheels_refuse_and_stale_handles_never_touch_a_reused_entry() {
     assert_eq!(wheel.capacity(), 2);
     let first = honoured(wheel.register(1, 10));
     let second = honoured(wheel.register(2, 10));
-    let before = wheel.clone();
-    assert_eq!(wheel.register(3, 10), Err(Refusal::Full));
-    assert_eq!(wheel, before);
+    refuses(&mut wheel, Refusal::Full, |w| w.register(3, 10));
     assert_eq!(wheel.cancel(first), Ok(1));
-    let before = wheel.clone();
-    assert_eq!(wheel.cancel(first), Err(Refusal::Stale));
-    assert_eq!(wheel, before);
+    refuses(&mut wheel, Refusal::Stale, |w| w.cancel(first));
     assert_eq!(wheel.deadline(first), None);
     let reused = honoured(wheel.register(3, 20));
     assert_eq!(reused.slot, first.slot);
     assert_ne!(reused, first);
-    let before = wheel.clone();
-    assert_eq!(wheel.cancel(first), Err(Refusal::Stale));
-    assert_eq!(wheel, before);
+    refuses(&mut wheel, Refusal::Stale, |w| w.cancel(first));
     assert_eq!(wheel.deadline(reused), Some(20));
     assert_eq!(wheel.advance(10), Ok(()));
     assert_eq!(drain_ids(&mut wheel), [2]);
-    let before = wheel.clone();
-    assert_eq!(wheel.cancel(second), Err(Refusal::Stale));
+    refuses(&mut wheel, Refusal::Stale, |w| w.cancel(second));
     let beyond = Handle { slot: 9, key: 1 };
-    assert_eq!(wheel.cancel(beyond), Err(Refusal::Stale));
+    refuses(&mut wheel, Refusal::Stale, |w| w.cancel(beyond));
     assert_eq!(wheel.deadline(beyond), None);
-    assert_eq!(wheel, before);
     assert_eq!(Wheel::<u64, 0>::new().register(1, 1), Err(Refusal::Full));
 }
 
@@ -70,19 +63,13 @@ fn full_wheels_refuse_and_stale_handles_never_touch_a_reused_entry() {
 fn refusals_leave_the_wheel_untouched() {
     let mut wheel = Wheel::<u64, 4>::starting_at(0, 100);
     honoured(wheel.register(1, 150));
-    let before = wheel.clone();
-    assert_eq!(wheel.advance(99), Err(Refusal::Regressed { now: 100 }));
-    assert_eq!(wheel, before);
+    let regressed = Refusal::Regressed { now: 100 };
+    refuses(&mut wheel, regressed, |w| w.advance(99));
     let mut out = [Due::new(77, 77); 2];
-    assert_eq!(
-        wheel.tick(0, 64, &mut out),
-        Err(Refusal::Regressed { now: 100 })
-    );
-    assert_eq!(wheel, before);
+    refuses(&mut wheel, regressed, |w| w.tick(0, 64, &mut out));
     assert_eq!(out, [Due::new(77, 77); 2]);
-    assert_eq!(wheel.register(2, 100), Err(Refusal::Elapsed));
-    assert_eq!(wheel.register(2, 0), Err(Refusal::Elapsed));
-    assert_eq!(wheel, before);
+    refuses(&mut wheel, Refusal::Elapsed, |w| w.register(2, 100));
+    refuses(&mut wheel, Refusal::Elapsed, |w| w.register(2, 0));
     assert_eq!(wheel.advance(100), Ok(()));
     assert_eq!(wheel.now(), 100);
     // Every refusal describes itself.
@@ -266,7 +253,7 @@ impl Model {
 }
 
 fn run_against_model<const N: usize>(seed: u64, scope: u16, start: u64, steps: usize) {
-    let mut rng = Rng(seed);
+    let mut rng = Rng::new(seed);
     let mut wheel = Wheel::<u64, N>::starting_at(scope, start);
     let mut model = Model {
         now: start,
@@ -283,7 +270,7 @@ fn run_against_model<const N: usize>(seed: u64, scope: u16, start: u64, steps: u
                     1 if !model.live.is_empty() => model.live[rng.pick(model.live.len())].0,
                     _ => model.now.saturating_add(rng.span()),
                 };
-                let id = rng.next();
+                let id = rng.next_u64();
                 let expected = if deadline <= model.now {
                     Err(Refusal::Elapsed)
                 } else if model.live.len() == N {
@@ -362,8 +349,8 @@ fn run_against_model<const N: usize>(seed: u64, scope: u16, start: u64, steps: u
 fn randomized_runs_match_the_naive_model() {
     for seed in 0..40 {
         run_against_model::<24>(seed, 0, 0, 4_000);
-        run_against_model::<5>(seed ^ 0xA5A5, 0x4236, Rng(seed).next() >> 8, 4_000);
-        let late = u64::MAX - Rng(seed).below(1 << 20);
+        run_against_model::<5>(seed ^ 0xA5A5, 0x4236, Rng::new(seed).next_u64() >> 8, 4_000);
+        let late = u64::MAX - Rng::new(seed).below(1 << 20);
         run_against_model::<24>(seed ^ 0x5A5A, u16::MAX, late, 4_000);
     }
 }

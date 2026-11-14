@@ -99,6 +99,35 @@ class ValuesTest < Minitest::Test
     assert_raises(RangeError) { WheelMachines::Drain.new([edited], 0, :caught_up) }
   end
 
+  # A singleton class opened on a genuine Due does not change what it is.
+  def test_an_opened_singleton_class_is_still_the_gems_due
+    opened = due(5, 2).tap(&:singleton_class)
+    drain = WheelMachines::Drain.new([opened, opened.clone], 0, :caught_up)
+    assert_equal [due(5, 2), due(5, 2)], drain.due
+  end
+
+  # The due list is read as exactly an Array: a subclass is a TypeError.
+  def test_drain_due_must_be_exactly_an_array
+    assert_raises(TypeError) { WheelMachines::Drain.new(Class.new(Array).new([due]), 0, :caught_up) }
+    assert_equal 1, WheelMachines::Drain.new([due].tap(&:singleton_class), 0, :caught_up).emitted
+  end
+
+  # Due fields are read from the struct itself: a redefined reader answers
+  # nothing to the binding and never runs.
+  def test_a_redefined_reader_is_ignored
+    row = due(5, 2)
+    readers(WheelMachines::Due, id: -> { -1 }, deadline: -> { raise 'the binding ran a reader' }) do
+      assert_equal 1, WheelMachines::Drain.new([row], 0, :caught_up).emitted
+    end
+  end
+
+  # A status outside the core's `Status` names every one it accepts.
+  def test_an_unknown_status_lists_the_accepted_ones
+    error = assert_raises(RangeError) { WheelMachines::Drain.new([], 0, :done) }
+    assert_equal 'status must be one of :caught_up, :output_full, :budget_spent', error.message
+    assert_raises(TypeError) { WheelMachines::Drain.new([], 0, 'caught_up') }
+  end
+
   # The classes are resolved at init and pinned, so a compaction moves none
   # of them: every path that builds or checks a value still works after it.
   def test_every_value_path_survives_gc_compact
@@ -113,6 +142,18 @@ class ValuesTest < Minitest::Test
   end
 
   private
+
+  # Runs the block with each reader of `value` redefined, then restores it.
+  def readers(value, **bodies)
+    bodies.each_key { |name| value.alias_method(:"__original_#{name}", name) }
+    bodies.each { |name, body| value.define_method(name, &body) }
+    yield
+  ensure
+    bodies.each_key do |name|
+      value.alias_method(name, :"__original_#{name}")
+      value.remove_method(:"__original_#{name}")
+    end
+  end
 
   def redefining(klass, body)
     singleton = klass.singleton_class

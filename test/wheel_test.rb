@@ -147,6 +147,19 @@ class WheelTest < Minitest::Test
     assert_equal :stale, WheelMachines::Wheel.new.cancel(handle)
   end
 
+  # A Handle is read as exactly a Handle. A subclass has no instance (the
+  # allocator is gone and only the wheel issues handles), and a wheel is not
+  # a handle.
+  def test_cancel_and_deadline_read_exactly_a_handle
+    wheel = WheelMachines::Wheel.new
+    handle = wheel.register(1, 10)
+    assert_raises(TypeError) { Class.new(WheelMachines::Handle).allocate }
+    assert_raises(TypeError) { wheel.cancel(wheel) }
+    assert_raises(TypeError) { wheel.deadline(wheel) }
+    assert_equal 10, wheel.deadline(handle.tap(&:singleton_class))
+    assert_equal 1, wheel.cancel(handle)
+  end
+
   def test_capacity_refuses_without_evicting
     wheel = WheelMachines::Wheel.new
     assert_equal 1024, WheelMachines::CAPACITY
@@ -239,6 +252,17 @@ class WheelTest < Minitest::Test
     assert_raises(FrozenError) { wheel.drain(1, 1) }
     assert_raises(FrozenError) { wheel.tick(1, 1, 1) }
     assert_equal [1, 0, 10, 10], [wheel.size, wheel.now, wheel.deadline(handle), wheel.next_wake]
+  end
+
+  # Frozen is checked before any argument is read: a bad argument to a frozen
+  # wheel is FrozenError, not TypeError or RangeError.
+  def test_a_frozen_wheel_raises_before_reading_arguments
+    wheel = WheelMachines::Wheel.new.freeze
+    assert_raises(FrozenError) { wheel.register('1', 10) }
+    assert_raises(FrozenError) { wheel.cancel(nil) }
+    assert_raises(FrozenError) { wheel.advance(-1) }
+    assert_raises(FrozenError) { wheel.drain(1.5, 1) }
+    assert_raises(FrozenError) { wheel.tick(1, nil, 2**64) }
   end
 
   def test_gc_stress_at_the_u64_boundary

@@ -6,12 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 description = "Fixed-capacity hierarchical timing wheel: register/cancel handles, due IDs on explicit ticks"
 readme = "README.md"
-exclude = ["src/**/tests.rs", "tests/"]
+exclude = ["src/**/tests.rs", "src/tests/", "src/test_support.rs", "tests/"]
 keywords = ["timing-wheel", "timer", "expiry", "timeout", "no-std"]
 categories = ["no-std", "algorithms"]
 
 [dependencies]
 periscope-machines.workspace = true
+
+[dev-dependencies]
+matryona-machines = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

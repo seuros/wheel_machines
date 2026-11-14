@@ -2,6 +2,7 @@
 //! when they depend on it.
 
 use super::*;
+use matryona_machines::testing::unchanged;
 
 #[test]
 fn a_drain_whose_work_does_not_fit_a_usize_does_not_exist() {
@@ -34,11 +35,9 @@ fn only_advance_and_tick_record_the_clock() {
 
     let mut wheel = Wheel::<u64, 4>::starting_at(0, 10);
     let handle = honoured(wheel.register(1, 50));
-    let before = wheel.clone();
-    assert_eq!(wheel.advance(10), Ok(()));
-    assert_eq!(wheel, before);
-    assert_eq!(wheel.drain(8, &mut [Due::default(); 4]).work(), 0);
-    assert_eq!(wheel, before);
+    assert_eq!(unchanged(&mut wheel, |w| w.advance(10)), Ok(()));
+    let drained = unchanged(&mut wheel, |w| w.drain(8, &mut [Due::default(); 4]));
+    assert_eq!(drained.work(), 0);
     assert_eq!(wheel.advance(20), Ok(()));
     assert_eq!(wheel.now(), 20);
     assert_eq!(wheel.cancel(handle), Ok(1));
