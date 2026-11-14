@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.4.0...wheel_machines/v0.5.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona-machines 0.2: Status symbols! table, exact-class Handle, exact Due fields, keep test support out of the crate
+
+### Features
+
+* adopt matryona-machines 0.2: Status symbols! table, exact-class Handle, exact Due fields, keep test support out of the crate ([a7c8651](https://github.com/seuros/wheel_machines/commit/a7c8651e40b8573af6853ef2a4bef45c8027eeb2))
+
 ## [0.4.0](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.3.0...wheel_machines/v0.4.0) (2026-11-14)
 
 
