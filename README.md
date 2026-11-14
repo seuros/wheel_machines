@@ -15,7 +15,10 @@ gem 'wheel_machines'
 TICK = 1_000_000
 def tick_now = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond) / TICK
 
-wheel = WheelMachines::Wheel.starting_at(0, tick_now)
+# Scope 1. Two wheels left in the same scope (Wheel.new is scope zero) alias:
+# each issues the same handles and cancels the other's registrations. Give
+# every wheel its own scope with with_scope / starting_at.
+wheel = WheelMachines::Wheel.starting_at(1, tick_now)
 
 # A lease that must be renewed within 30 seconds.
 handle = wheel.register(lease.id, tick_now + 30_000)
@@ -259,23 +262,25 @@ A restarted wheel counts from one again, so a handle that outlived the restart c
 
 ### What each call answers
 
-| Call | Honoured | Refused, nothing changed |
-| --- | --- | --- |
-| `register` | a `Handle` | `:elapsed`, `:full`, `:exhausted` |
-| `cancel` | the id, an Integer | `:stale` |
-| `advance` | `:advanced` | `:regressed` |
-| `tick` | a `Drain` | `:regressed` |
-| `drain` | a `Drain` | never refuses |
-| `deadline` | the tick, or `nil` for a handle that names no live registration | a query, never refuses |
-| `next_wake` | the tick, or `nil` when the wheel is empty | a query, never refuses |
+| Call | Honoured | Refused, nothing changed | Records the clock |
+| --- | --- | --- | --- |
+| `register` | a `Handle` | `:elapsed`, `:full`, `:exhausted` | no: judged against the tick already held |
+| `cancel` | the id, an Integer | `:stale` | no: takes no tick |
+| `advance` | `:advanced` | `:regressed` | yes, `now` (the tick already held, again, changes nothing) |
+| `tick` | a `Drain` | `:regressed` | yes, `now` |
+| `drain` | a `Drain` | never refuses | no: drains against `wheel.now` |
+| `deadline` | the tick, or `nil` for a handle that names no live registration | a query, never refuses | no |
+| `next_wake` | the tick, or `nil` when the wheel is empty | a query, never refuses | no |
 
 `:exhausted` means this wheel has issued all 2**48-1 handles of its scope; none is ever reissued. Every refusal has its own symbol; there is no catch-all. `:regressed` is the core's `Regressed { now }`, and the tick it carries is `wheel.now`.
 
 ## The Rules of the Chronometer Tender
 
-- **Ids, ticks, budgets, and limits are Integers** in `0..2**64-1`. Floats, nil, and strings raise `TypeError`. Out of range raises `RangeError`.
+- **Ids, ticks, budgets, and limits are Integers** in `0..2**64-1`. Floats, nil, and strings raise `TypeError`. Out of range raises `RangeError`; so does a budget or limit past the platform's `usize` (only reachable on a 32-bit build), which is never quietly read as "no limit". Both are checked before the wheel moves, so `tick` raising leaves the tick where it was.
+- **Values are valid or do not exist.** `Due.new` and `Drain.new` validate through the core, whether the wheel built the value or you did: a `Due` holds two Integers in `0..2**64-1`; a `Drain` holds a frozen copy of an Array of `Due`, a cascade count, and one of `:caught_up`, `:output_full`, `:budget_spent`. Wrong type raises `TypeError`; a value the core's `Drain::new` refuses (unknown status, negative count, work past `usize`) raises `RangeError`. Both classes are sealed (subclassing raises `TypeError`, `allocate` is undefined); sealing stops accidents, not reflection, so the binding is the authority: a `Due` it reads must be exactly a `Due`, and its fields are checked again, so a forged one raises.
+- **The binding never loses work.** Arguments are checked before the core moves, and `drain` and `tick` decide on a copy of the wheel kept only once the `Drain` is built: a build that raises (a redefined `Due.new`) has drained nothing, one that freezes the wheel raises `FrozenError`, and one that changes the wheel meanwhile raises `RuntimeError`, in each case with nothing applied.
 - **Every tick is reachable.** Eleven wheels cover the whole 64-bit range. No deadline is too far away.
-- **Scopes.** A `Handle` is only meaningful to the wheel that issued it. Give each wheel its own scope with `with_scope(scope)` or `starting_at(scope, now)`; the core cannot pick one. A `Handle` from a wheel in another scope is `:stale`, and its `deadline` there is `nil`. Two wheels in the same scope issue the same handles. Handles can't be built or copied by hand.
+- **Scopes.** A `Handle` is only meaningful to the wheel that issued it. Give each wheel its own scope with `with_scope(scope)` or `starting_at(scope, now)`; the core cannot pick one. A `Handle` from a wheel in another scope is `:stale`, and its `deadline` there is `nil`. Two wheels in the same scope issue the same handles, so two `Wheel.new` alias: each cancels the other's registrations. Handles can't be built or copied by hand.
 - **Restarts.** Resume from a saved count with `Wheel.resumed(scope, issued, now)`, or give each incarnation a new scope. `resumed` restores the handle sequence only; re-registering is yours.
 - **Refusals don't raise, and don't change anything.** `:elapsed`, `:full`, `:exhausted`, `:regressed`, and `:stale` are answers. Only malformed input raises.
 - **Draining never moves time.** Only `advance` and `tick` do, and only to the tick you pass.

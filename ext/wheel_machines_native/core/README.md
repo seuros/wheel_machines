@@ -43,7 +43,8 @@ tick zero. `Wheel::scope` and `Handle::scope` read it.
 `cancel` answers `Stale` and `deadline` answers `None` for a handle the wheel
 did not issue, before looking at any entry. Give each wheel its own scope: the
 core reads no clock and no random source, so it cannot pick one, and two wheels
-left in the same scope issue the same handles. A scope is `Exhausted` after
+left in the same scope issue the same handles, so two `Wheel::new()` alias: each
+cancels the other's registrations. A scope is `Exhausted` after
 2^48 - 1 handles.
 
 **Restarts.** A fresh wheel counts from one again, so a handle that outlived a
@@ -58,6 +59,25 @@ is `None` when `issued` is beyond `periscope_machines::SEQUENCE_MAX`.
 `advance` and `tick` answer `Regressed { now }` with the tick the wheel holds.
 `drain` never refuses; its `Status` says why it stopped.
 
+**Broken invariants.** The core never panics at run time. Every entry filed
+in a slot is live; if that ever broke, `drain` would meet a filed entry that
+is already free. That arm `debug_assert!`s, so tests catch it, and in release
+takes the entry off its slot and carries on. It is the one arm that does not
+stop with nothing changed, because it cannot: an entry left filed would be met
+first on every later drain and the wheel would never emit what is due behind
+it. The entry is already on the free list, so the unlink frees nothing twice
+and emits nothing.
+
+**Values.** `Drain` keeps its fields private behind `emitted()`,
+`cascaded()` and `status()`; `Drain::new` builds one and answers `None` when
+`emitted + cascaded` does not fit a `usize`, which no drain charges. `Due`
+holds any id and deadline (`Due::new` never refuses).
+
+**Which answers record the clock.** Only `advance` and an honoured `tick`
+record `now`; re-advancing to the tick already held records the same value
+and changes nothing. `register` judges `Elapsed` against the tick already held
+and records none; `cancel`, `drain`, and the queries take no instant.
+
 The Ruby gem mirrors `Handle`, `Due` and `Drain` under the same names; its
 `Drain` carries the due entries where this one counts `emitted`.
 
@@ -68,17 +88,18 @@ because a deadline of 0 is always refused. The wheel itself asks nothing of
 `I` beyond `Copy`; for an id without `Default`, pre-fill with `Due::new`.
 
 ```rust
-use wheel_machines::{Due, Refusal, Status, Wheel};
+use wheel_machines::{Drain, Due, Refusal, Status, Wheel};
 
+# fn main() -> Result<(), Refusal> {
 let mut wheel = Wheel::<u64, 8>::new();
-let lease = wheel.register(7, 5_000).expect("room for one");
-let _retry = wheel.register(8, 90).expect("room for two");
+let lease = wheel.register(7, 5_000)?;
+wheel.register(8, 90)?;
 assert_eq!(wheel.register(9, 0), Err(Refusal::Elapsed));
 assert_eq!(wheel.next_wake(), Some(64));
 
 let mut out = [Due::default(); 4];
-let drain = wheel.tick(100, 16, &mut out).expect("time moved forward");
-assert_eq!((drain.emitted, drain.cascaded, drain.status), (1, 1, Status::CaughtUp));
+let drain = wheel.tick(100, 16, &mut out)?;
+assert_eq!(Some(drain), Drain::new(1, 1, Status::CaughtUp));
 assert_eq!(out[0], Due::new(8, 90));
 
 assert_eq!(wheel.cancel(lease), Ok(7));
@@ -88,9 +109,11 @@ assert_eq!(wheel.tick(99, 16, &mut out), Err(Refusal::Regressed { now: 100 }));
 // Another wheel, another scope: it refuses a handle it did not issue.
 let mut leases = Wheel::<u64, 8>::with_scope(1);
 let mut retries = Wheel::<u64, 8>::with_scope(2);
-let handle = leases.register(7, 5_000).expect("room");
-retries.register(8, 5_000).expect("room");
+let handle = leases.register(7, 5_000)?;
+retries.register(8, 5_000)?;
 assert_eq!(handle.scope(), 1);
 assert_eq!(retries.cancel(handle), Err(Refusal::Stale));
 assert_eq!(leases.cancel(handle), Ok(7));
+# Ok(())
+# }
 ```

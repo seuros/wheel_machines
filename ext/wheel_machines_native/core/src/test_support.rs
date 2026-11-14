@@ -2,7 +2,7 @@
 
 use std::vec::Vec;
 
-use crate::{Drain, Due, Handle, Refusal, Wheel};
+use crate::{BITS, Due, LEVELS, Refusal, Wheel};
 
 /// A wheel resumed after `issued` handle ids, to reach the end of the sequence.
 pub fn resumed<const N: usize>(scope: u16, issued: u64, now: u64) -> Wheel<u64, N> {
@@ -35,23 +35,17 @@ impl Rng {
 
     /// A span whose magnitude is uniform over the wheel's eleven levels.
     pub fn span(&mut self) -> u64 {
-        let level = self.below(11);
-        1 + self.below(1 << (6 * level))
+        let level = self.below(LEVELS as u64);
+        1 + self.below(1 << (BITS as u64 * level))
     }
 }
 
-pub fn registered(result: Result<Handle, Refusal>) -> Handle {
-    let Ok(handle) = result else {
-        panic!("expected a handle, got {result:?}");
-    };
-    handle
-}
-
-pub fn ticked(result: Result<Drain, Refusal>) -> Drain {
-    let Ok(drain) = result else {
-        panic!("expected a drain, got {result:?}");
-    };
-    drain
+/// The value of an honoured call; panics with the refusal otherwise.
+pub fn honoured<T: core::fmt::Debug>(result: Result<T, Refusal>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(refusal) => panic!("expected an honoured call, got {refusal:?}"),
+    }
 }
 
 /// Drain to completion with a roomy budget and return the emitted ids.

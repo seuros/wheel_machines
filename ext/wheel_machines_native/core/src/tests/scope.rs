@@ -9,8 +9,8 @@ fn a_handle_from_another_scope_is_refused_and_changes_nothing() {
     let mut a = Wheel::<u64, 1>::with_scope(1);
     let mut b = Wheel::<u64, 1>::with_scope(2);
     assert_eq!((a.scope(), b.scope()), (1, 2));
-    let from_a = registered(a.register(1, 10));
-    let from_b = registered(b.register(2, 10));
+    let from_a = honoured(a.register(1, 10));
+    let from_b = honoured(b.register(2, 10));
     assert_eq!((from_a.scope(), from_b.scope()), (1, 2));
     assert_eq!(from_a.slot, from_b.slot);
     assert_eq!(sequence_of(from_a.key), sequence_of(from_b.key));
@@ -23,24 +23,22 @@ fn a_handle_from_another_scope_is_refused_and_changes_nothing() {
     assert_eq!(a.deadline(from_b), None);
     assert_eq!(a, a_before);
 
+    // Nor one of this scope that was never issued, or the raw zero.
+    for key in [scoped(1, 2), 0] {
+        let unissued = Handle {
+            slot: from_a.slot,
+            key,
+        };
+        assert_eq!(a.cancel(unissued), Err(Refusal::Stale));
+        assert_eq!(a.deadline(unissued), None);
+    }
+    assert_eq!(a, a_before);
+
     assert_eq!(
         (a.deadline(from_a), b.deadline(from_b)),
         (Some(10), Some(10))
     );
     assert_eq!((a.cancel(from_a), b.cancel(from_b)), (Ok(1), Ok(2)));
-}
-
-/// Scopes are the caller's: the core reads no clock and no random source, so
-/// two wheels left in one scope issue the same handles and still alias.
-#[test]
-fn two_wheels_left_in_the_same_scope_still_alias() {
-    let mut a = Wheel::<u64, 1>::new();
-    let mut b = Wheel::<u64, 1>::new();
-    let from_a = registered(a.register(1, 10));
-    let from_b = registered(b.register(2, 10));
-    assert_eq!(from_a, from_b);
-    assert_eq!(b.cancel(from_a), Ok(2));
-    assert!(b.is_empty());
 }
 
 #[test]
@@ -58,10 +56,15 @@ fn every_constructor_carries_its_scope_and_scope_zero_counts_from_one() {
     assert_eq!(plain.scope(), 0);
     assert_eq!(plain.register(1, 10), Ok(Handle { slot: 0, key: 1 }));
     assert_eq!(plain.register(2, 10), Ok(Handle { slot: 1, key: 2 }));
+    // Scopes are the caller's: the core reads no clock and no random source,
+    // so two wheels left in one scope issue the same handles and still alias.
+    let mut twin = Wheel::<u64, 2>::new();
+    assert_eq!(twin.register(3, 10), Ok(Handle { slot: 0, key: 1 }));
+    assert_eq!(plain.cancel(Handle { slot: 0, key: 1 }), Ok(1));
 
     let mut scoped_wheel = Wheel::<u64, 2>::starting_at(7, 100);
     assert_eq!((scoped_wheel.scope(), scoped_wheel.now()), (7, 100));
-    let first = registered(scoped_wheel.register(1, 101));
+    let first = honoured(scoped_wheel.register(1, 101));
     assert_eq!(
         first,
         Handle {
@@ -73,32 +76,13 @@ fn every_constructor_carries_its_scope_and_scope_zero_counts_from_one() {
 }
 
 #[test]
-fn a_handle_of_this_scope_that_was_never_issued_is_stale() {
-    let mut wheel = Wheel::<u64, 2>::with_scope(3);
-    let live = registered(wheel.register(1, 10));
-    let before = wheel.clone();
-    let unissued = Handle {
-        slot: live.slot,
-        key: scoped(3, 2),
-    };
-    assert_eq!(wheel.cancel(unissued), Err(Refusal::Stale));
-    assert_eq!(wheel.deadline(unissued), None);
-    let none = Handle {
-        slot: live.slot,
-        key: 0,
-    };
-    assert_eq!(wheel.cancel(none), Err(Refusal::Stale));
-    assert_eq!(wheel, before);
-}
-
-#[test]
 fn the_last_id_of_a_scope_is_issued_and_then_the_wheel_is_exhausted() {
     let mut wheel = resumed::<2>(3, SEQUENCE_MAX - 1, 0);
     let before = wheel.clone();
     // A call refused for another reason spends no id.
     assert_eq!(wheel.register(1, 0), Err(Refusal::Elapsed));
     assert_eq!(wheel, before);
-    let last = registered(wheel.register(1, 10));
+    let last = honoured(wheel.register(1, 10));
     assert_eq!(
         last,
         Handle {
@@ -114,6 +98,15 @@ fn the_last_id_of_a_scope_is_issued_and_then_the_wheel_is_exhausted() {
     assert_eq!(wheel.cancel(last), Ok(1));
     assert_eq!(wheel.register(2, 10), Err(Refusal::Exhausted));
     assert_eq!(wheel.cancel(last), Err(Refusal::Stale));
+    // Resumed spent, it stays spent; one past the last sequence is no state.
+    let mut spent = resumed::<2>(3, SEQUENCE_MAX, 0);
+    assert_eq!((spent.scope(), spent.issued()), (3, SEQUENCE_MAX));
+    let before = spent.clone();
+    assert_eq!(spent.register(1, 10), Err(Refusal::Exhausted));
+    assert_eq!(spent, before);
+    for issued in [SEQUENCE_MAX + 1, u64::MAX] {
+        assert_eq!(Wheel::<u64, 2>::resumed(3, issued, 0), None);
+    }
 }
 
 /// A fresh wheel would count from one again, and a handle that outlived the
@@ -122,11 +115,11 @@ fn the_last_id_of_a_scope_is_issued_and_then_the_wheel_is_exhausted() {
 fn a_resumed_wheel_continues_its_scope_and_refuses_every_earlier_handle() {
     let mut first = Wheel::<u64, 2>::starting_at(5, 100);
     let old: [Handle; 3] = core::array::from_fn(|at| {
-        let handle = registered(first.register(at as u64, 200));
+        let handle = honoured(first.register(at as u64, 200));
         assert_eq!(first.cancel(handle).map(|_| ()), Ok(()));
         handle
     });
-    let pending = registered(first.register(9, 300));
+    let pending = honoured(first.register(9, 300));
     assert_eq!(first.issued(), 4);
 
     let mut wheel = resumed::<2>(first.scope(), first.issued(), first.now());
@@ -134,11 +127,11 @@ fn a_resumed_wheel_continues_its_scope_and_refuses_every_earlier_handle() {
     // Only the sequence came back: nothing is registered.
     assert!(wheel.is_empty());
     assert_eq!(wheel.next_wake(), None);
-    let next = registered(wheel.register(7, 150));
+    let next = honoured(wheel.register(7, 150));
     assert_eq!(next.key, scoped(5, 5));
     // The entry every earlier handle sat in is in use again.
     assert_eq!((next.slot, pending.slot), (old[0].slot, old[0].slot));
-    let again = registered(wheel.register(8, 150));
+    let again = honoured(wheel.register(8, 150));
     assert_eq!(again.key, scoped(5, 6));
 
     let before = wheel.clone();
@@ -150,15 +143,4 @@ fn a_resumed_wheel_continues_its_scope_and_refuses_every_earlier_handle() {
     }
     assert_eq!(wheel, before);
     assert_eq!((wheel.cancel(next), wheel.cancel(again)), (Ok(7), Ok(8)));
-}
-
-#[test]
-fn a_wheel_resumed_at_the_last_sequence_is_spent_and_one_past_it_is_none() {
-    let mut spent = resumed::<2>(3, SEQUENCE_MAX, 0);
-    assert_eq!((spent.scope(), spent.issued()), (3, SEQUENCE_MAX));
-    let before = spent.clone();
-    assert_eq!(spent.register(1, 10), Err(Refusal::Exhausted));
-    assert_eq!(spent, before);
-    assert_eq!(Wheel::<u64, 2>::resumed(3, SEQUENCE_MAX + 1, 0), None);
-    assert_eq!(Wheel::<u64, 2>::resumed(3, u64::MAX, 0), None);
 }

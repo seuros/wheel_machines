@@ -3,6 +3,8 @@ module WheelMachines
   CAPACITY: Integer
   MAX_CASCADES: Integer
 
+  # Both fields are Integers in 0..2**64-1: TypeError for a non-Integer,
+  # RangeError outside the range.
   class Due < Data
     attr_reader id: Integer
     attr_reader deadline: Integer
@@ -10,6 +12,10 @@ module WheelMachines
                 | (id: Integer, deadline: Integer) -> Due
   end
 
+  # Validated by the core's `Drain::new`: TypeError when `due` is not an
+  # Array of Due or `status` not a Symbol; RangeError for an unknown status, a
+  # negative `cascaded`, or work past the core's usize. `due` is stored as a
+  # frozen copy.
   class Drain < Data
     type status = :caught_up | :output_full | :budget_spent
 
@@ -62,11 +68,14 @@ module WheelMachines
     def cancel: (Handle) -> (Integer | :stale)
     # nil for a Handle that names no live registration here.
     def deadline: (Handle) -> Integer?
-    # Honoured: :advanced (repeating the current tick included). Refused: :regressed.
+    # Honoured: :advanced (repeating the current tick included). Records
+    # `now`: the answer depends on it. Refused: :regressed.
     def advance: (Integer now) -> (:advanced | :regressed)
-    # Never refuses.
+    # Never refuses and records no clock: it drains against `now`. A budget
+    # or limit past usize raises RangeError before anything is drained.
     def drain: (Integer budget, Integer limit) -> Drain
-    # Honoured: a Drain. Refused: :regressed.
+    # Honoured: a Drain; records `now`. Refused: :regressed. A budget or
+    # limit past usize raises RangeError before the tick moves.
     def tick: (Integer now, Integer budget, Integer limit) -> (Drain | :regressed)
   end
 end

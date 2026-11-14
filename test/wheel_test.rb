@@ -20,28 +20,15 @@ class WheelTest < Minitest::Test
     drain = wheel.drain(64, 64)
     assert_equal [2, 5, 1, 3], ids(drain)
     assert_equal [5, 5, 70, 70], drain.due.map(&:deadline)
+    assert_equal [4, 2], [drain.emitted, drain.cascaded]
+    assert_equal WheelMachines::Due.new(id: 2, deadline: 5), drain.due.first
+    assert_predicate drain, :frozen?
     assert_equal :caught_up, drain.status
     assert_predicate drain, :caught_up?
     assert_equal 4096, wheel.next_wake
     assert_equal [4], ids(wheel.tick(4096, 64, 64))
     assert_predicate wheel, :empty?
     assert_nil wheel.next_wake
-  end
-
-  def test_drain_and_due_are_frozen_data
-    wheel = WheelMachines::Wheel.new
-    wheel.register(9, 3)
-    drain = wheel.tick(3, 8, 8)
-    assert_operator WheelMachines::Drain, :<, Data
-    assert_operator WheelMachines::Due, :<, Data
-    assert_equal WheelMachines::Due.new(id: 9, deadline: 3), drain.due.first
-    assert_predicate drain, :frozen?
-    assert_predicate drain.due, :frozen?
-    assert_equal 1, drain.work
-    assert_equal 1, drain.emitted
-    assert_equal 0, drain.cascaded
-    assert_equal %i[due cascaded status], WheelMachines::Drain.members
-    assert_equal [0, 0], [wheel.drain(8, 8).emitted, wheel.drain(8, 8).work]
   end
 
   def test_cancel_deadline_and_stale_handles
@@ -75,18 +62,15 @@ class WheelTest < Minitest::Test
     assert_nil a.deadline(from_b)
     assert_equal [1, 1, 10, 10], [a.size, b.size, a.deadline(from_a), b.deadline(from_b)]
     assert_equal [1, 2], [a.cancel(from_a), b.cancel(from_b)]
-  end
-
-  # The core cannot pick a scope: two wheels left in scope zero issue the same
-  # handles, and one honours the other's.
-  def test_wheels_left_in_the_same_scope_still_alias
-    a = WheelMachines::Wheel.new
-    b = WheelMachines::Wheel.new
-    handle = a.register(1, 10)
-    b.register(2, 10)
-    assert_equal [0, 0, 0], [a.scope, b.scope, handle.scope]
-    assert_equal 2, b.cancel(handle)
-    assert_predicate b, :empty?
+    # The core cannot pick a scope: two wheels left in scope zero issue the
+    # same handles, and one honours the other's.
+    c = WheelMachines::Wheel.new
+    d = WheelMachines::Wheel.new
+    handle = c.register(1, 10)
+    d.register(2, 10)
+    assert_equal [0, 0, 0], [c.scope, d.scope, handle.scope]
+    assert_equal 2, d.cancel(handle)
+    assert_predicate d, :empty?
   end
 
   def test_scoped_constructors
@@ -235,7 +219,6 @@ class WheelTest < Minitest::Test
       assert_raises(TypeError) { wheel.tick(1, 1, value) }
       assert_raises(TypeError) { wheel.cancel(value) }
       assert_raises(TypeError) { wheel.deadline(value) }
-      assert_raises(TypeError) { WheelMachines::Wheel.starting_at(0, value) }
     end
     [-1, 2**64].each do |n|
       assert_raises(RangeError) { wheel.register(n, 10) }

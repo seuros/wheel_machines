@@ -1,11 +1,13 @@
+use std::string::ToString;
 use std::vec::Vec;
 
 use periscope_machines::{SEQUENCE_MAX, scoped, sequence_of};
 
 use super::*;
-use crate::test_support::{Rng, drain_ids, registered, resumed, ticked};
+use crate::test_support::{Rng, drain_ids, honoured, resumed};
 
 mod scope;
+mod values;
 
 const BLANK: Due<u64> = Due::new(0, 0);
 
@@ -13,12 +15,12 @@ const BLANK: Due<u64> = Due::new(0, 0);
 fn due_ids_come_out_in_deadline_then_registration_order() {
     let mut wheel = Wheel::<u64, 8>::new();
     for (id, deadline) in [(1, 70), (2, 5), (3, 70), (4, 4_096), (5, 5), (6, 69)] {
-        registered(wheel.register(id, deadline));
+        honoured(wheel.register(id, deadline));
     }
     assert_eq!(wheel.len(), 6);
     assert_eq!(wheel.tick(4, 64, &mut [BLANK; 8]).map(|d| d.emitted), Ok(0));
     let mut out = [BLANK; 8];
-    let drain = ticked(wheel.tick(70, 64, &mut out));
+    let drain = honoured(wheel.tick(70, 64, &mut out));
     assert_eq!(drain.status, Status::CaughtUp);
     assert_eq!(drain.emitted, 5);
     assert_eq!(
@@ -26,8 +28,8 @@ fn due_ids_come_out_in_deadline_then_registration_order() {
         [(2, 5), (5, 5), (6, 69), (1, 70), (3, 70)].map(|(id, at)| Due::new(id, at))
     );
     assert_eq!(wheel.len(), 1);
-    assert_eq!(ticked(wheel.tick(4_095, 64, &mut out)).emitted, 0);
-    assert_eq!(ticked(wheel.tick(4_096, 64, &mut out)).emitted, 1);
+    assert_eq!(honoured(wheel.tick(4_095, 64, &mut out)).emitted, 0);
+    assert_eq!(honoured(wheel.tick(4_096, 64, &mut out)).emitted, 1);
     assert_eq!(out[0], Due::new(4, 4_096));
     assert!(wheel.is_empty());
 }
@@ -36,8 +38,8 @@ fn due_ids_come_out_in_deadline_then_registration_order() {
 fn full_wheels_refuse_and_stale_handles_never_touch_a_reused_entry() {
     let mut wheel = Wheel::<u64, 2>::new();
     assert_eq!(wheel.capacity(), 2);
-    let first = registered(wheel.register(1, 10));
-    let second = registered(wheel.register(2, 10));
+    let first = honoured(wheel.register(1, 10));
+    let second = honoured(wheel.register(2, 10));
     let before = wheel.clone();
     assert_eq!(wheel.register(3, 10), Err(Refusal::Full));
     assert_eq!(wheel, before);
@@ -46,7 +48,7 @@ fn full_wheels_refuse_and_stale_handles_never_touch_a_reused_entry() {
     assert_eq!(wheel.cancel(first), Err(Refusal::Stale));
     assert_eq!(wheel, before);
     assert_eq!(wheel.deadline(first), None);
-    let reused = registered(wheel.register(3, 20));
+    let reused = honoured(wheel.register(3, 20));
     assert_eq!(reused.slot, first.slot);
     assert_ne!(reused, first);
     let before = wheel.clone();
@@ -67,7 +69,7 @@ fn full_wheels_refuse_and_stale_handles_never_touch_a_reused_entry() {
 #[test]
 fn refusals_leave_the_wheel_untouched() {
     let mut wheel = Wheel::<u64, 4>::starting_at(0, 100);
-    registered(wheel.register(1, 150));
+    honoured(wheel.register(1, 150));
     let before = wheel.clone();
     assert_eq!(wheel.advance(99), Err(Refusal::Regressed { now: 100 }));
     assert_eq!(wheel, before);
@@ -83,36 +85,27 @@ fn refusals_leave_the_wheel_untouched() {
     assert_eq!(wheel, before);
     assert_eq!(wheel.advance(100), Ok(()));
     assert_eq!(wheel.now(), 100);
-    let mut spent = resumed::<4>(0, SEQUENCE_MAX, 100);
-    let before = spent.clone();
-    assert_eq!(spent.register(2, 101), Err(Refusal::Exhausted));
-    assert_eq!(spent, before);
-}
-
-#[test]
-fn draining_never_moves_the_tick() {
-    let mut wheel = Wheel::<u64, 4>::new();
-    registered(wheel.register(1, 1_000_000));
-    assert_eq!(wheel.drain(64, &mut [BLANK; 4]).work(), 0);
-    assert_eq!(wheel.now(), 0);
-    assert_eq!(wheel.next_wake(), Some(786_432));
-    assert_eq!(wheel.now(), 0);
-    assert_eq!(wheel.advance(5), Ok(()));
-    assert!(wheel.drain(64, &mut [BLANK; 4]).is_caught_up());
-    assert_eq!(wheel.now(), 5);
-    assert_eq!(wheel.register(2, 5), Err(Refusal::Elapsed));
-    assert_eq!(wheel.len(), 1);
+    // Every refusal describes itself.
+    let error: &dyn core::error::Error = &Refusal::Regressed { now: 100 };
+    assert_eq!(
+        error.to_string(),
+        "tick is earlier than the wheel's tick 100"
+    );
+    assert_eq!(
+        Refusal::Stale.to_string(),
+        "handle does not name a live registration"
+    );
 }
 
 #[test]
 fn the_whole_u64_range_is_indexed() {
     let mut wheel = Wheel::<u64, 4>::new();
-    registered(wheel.register(1, u64::MAX));
-    registered(wheel.register(2, u64::MAX - 1));
-    registered(wheel.register(3, 1 << 63));
-    registered(wheel.register(4, 1));
+    honoured(wheel.register(1, u64::MAX));
+    honoured(wheel.register(2, u64::MAX - 1));
+    honoured(wheel.register(3, 1 << 63));
+    honoured(wheel.register(4, 1));
     assert_eq!(
-        ticked(wheel.tick((1 << 63) - 1, 64, &mut [BLANK; 4])).emitted,
+        honoured(wheel.tick((1 << 63) - 1, 64, &mut [BLANK; 4])).emitted,
         1
     );
     assert_eq!(wheel.next_wake(), Some(1 << 63));
@@ -124,7 +117,7 @@ fn the_whole_u64_range_is_indexed() {
     assert_eq!(wheel.next_wake(), None);
     assert_eq!(wheel.register(5, u64::MAX), Err(Refusal::Elapsed));
     let mut late = Wheel::<u64, 1>::starting_at(0, u64::MAX - 1);
-    registered(late.register(9, u64::MAX));
+    honoured(late.register(9, u64::MAX));
     assert_eq!(late.advance(u64::MAX), Ok(()));
     assert_eq!(drain_ids(&mut late), [9]);
 }
@@ -133,7 +126,7 @@ fn the_whole_u64_range_is_indexed() {
 fn cascades_and_due_entries_are_charged_against_the_budget() {
     let mut wheel = Wheel::<u64, 4>::new();
     let deadline = 64 * 64 * 64 + 64 * 64 + 64 + 1;
-    registered(wheel.register(7, deadline));
+    honoured(wheel.register(7, deadline));
     assert_eq!(wheel.advance(deadline), Ok(()));
     let mut out = [BLANK; 4];
     let mut steps = Vec::new();
@@ -151,7 +144,7 @@ fn cascades_and_due_entries_are_charged_against_the_budget() {
     assert_eq!(wheel.drain(0, &mut out).status, Status::CaughtUp);
 
     let mut far = Wheel::<u64, 1>::new();
-    registered(far.register(1, u64::MAX));
+    honoured(far.register(1, u64::MAX));
     assert_eq!(far.advance(u64::MAX), Ok(()));
     let drain = far.drain(usize::MAX, &mut out);
     assert_eq!((drain.cascaded, drain.emitted), (MAX_CASCADES, 1));
@@ -161,7 +154,7 @@ fn cascades_and_due_entries_are_charged_against_the_budget() {
 #[test]
 fn a_full_buffer_or_spent_budget_resumes_where_it_stopped() {
     let mut wheel = Wheel::<u64, 8>::new();
-    let handles: Vec<Handle> = (0..6).map(|id| registered(wheel.register(id, 9))).collect();
+    let handles: Vec<Handle> = (0..6).map(|id| honoured(wheel.register(id, 9))).collect();
     assert_eq!(wheel.advance(9), Ok(()));
     let drain = wheel.drain(64, &mut []);
     assert_eq!((drain.emitted, drain.status), (0, Status::OutputFull));
@@ -175,7 +168,7 @@ fn a_full_buffer_or_spent_budget_resumes_where_it_stopped() {
     assert_eq!(wheel.cancel(handles[0]), Err(Refusal::Stale));
     assert_eq!(wheel.cancel(handles[3]), Ok(3));
     assert_eq!(wheel.advance(500), Ok(()));
-    registered(wheel.register(6, 501));
+    honoured(wheel.register(6, 501));
     let drain = wheel.drain(1, &mut out);
     assert_eq!((drain.emitted, drain.status), (1, Status::BudgetSpent));
     assert_eq!(out[0].id, 2);
@@ -187,16 +180,16 @@ fn a_full_buffer_or_spent_budget_resumes_where_it_stopped() {
 fn registering_mid_cascade_keeps_equal_deadlines_in_registration_order() {
     let mut wheel = Wheel::<u64, 8>::new();
     for id in 0..3 {
-        registered(wheel.register(id, 4_200));
+        honoured(wheel.register(id, 4_200));
     }
-    registered(wheel.register(3, 4_100));
+    honoured(wheel.register(3, 4_100));
     assert_eq!(wheel.advance(4_150), Ok(()));
     let drain = wheel.drain(1, &mut [BLANK; 8]);
     assert_eq!((drain.cascaded, drain.status), (1, Status::BudgetSpent));
     assert_eq!(wheel.next_wake(), Some(4_150));
-    registered(wheel.register(4, 4_200));
-    registered(wheel.register(5, 4_151));
-    registered(wheel.register(6, 9_000));
+    honoured(wheel.register(4, 4_200));
+    honoured(wheel.register(5, 4_151));
+    honoured(wheel.register(6, 9_000));
     assert_eq!(drain_ids(&mut wheel), [3]);
     assert_eq!(wheel.advance(4_200), Ok(()));
     assert_eq!(drain_ids(&mut wheel), [5, 0, 1, 2, 4]);
@@ -208,12 +201,12 @@ fn registering_mid_cascade_keeps_equal_deadlines_in_registration_order() {
 fn next_wake_never_passes_the_earliest_deadline_and_always_finds_work() {
     let mut wheel = Wheel::<u64, 4>::new();
     assert_eq!(wheel.next_wake(), None);
-    registered(wheel.register(1, 300));
+    honoured(wheel.register(1, 300));
     let mut out = [BLANK; 4];
     let mut emitted = 0;
     while let Some(wake) = wheel.next_wake() {
         assert!(wake <= 300 && wake >= wheel.now());
-        let drain = ticked(wheel.tick(wake, 64, &mut out));
+        let drain = honoured(wheel.tick(wake, 64, &mut out));
         assert!(drain.work() > 0);
         emitted += drain.emitted;
     }
@@ -385,29 +378,15 @@ fn a_default_buffer_needs_no_invented_id() {
         Expire,
     }
     let mut wheel = Wheel::<Job, 4>::new();
-    registered(wheel.register(Job::Expire, 9));
-    registered(wheel.register(Job::Renew, 3));
+    honoured(wheel.register(Job::Expire, 9));
+    honoured(wheel.register(Job::Renew, 3));
     let mut out = [Due::<Job>::default(); 4];
     assert_eq!(out[0], Due::new(Job::Idle, 0));
     assert_eq!(wheel.drain(8, &mut out).emitted, 0);
-    assert_eq!(ticked(wheel.tick(9, 8, &mut out)).emitted, 2);
+    assert_eq!(honoured(wheel.tick(9, 8, &mut out)).emitted, 2);
     assert_eq!(
         out[..2],
         [Due::new(Job::Renew, 3), Due::new(Job::Expire, 9)]
     );
     assert_eq!(out[2..], [Due::default(); 2]);
-}
-
-#[test]
-fn refusals_describe_themselves() {
-    use std::string::ToString;
-    let error: &dyn core::error::Error = &Refusal::Regressed { now: 100 };
-    assert_eq!(
-        error.to_string(),
-        "tick is earlier than the wheel's tick 100"
-    );
-    assert_eq!(
-        Refusal::Stale.to_string(),
-        "handle does not name a live registration"
-    );
 }

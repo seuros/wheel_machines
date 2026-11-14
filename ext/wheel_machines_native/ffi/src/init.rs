@@ -1,13 +1,19 @@
 //! Private native entry point.
-use crate::{CAPACITY, Issued, Wheel};
+use crate::{
+    CAPACITY, Issued, Wheel,
+    values::{checked_drain, checked_due},
+};
 use magnus::{Error, Ruby, function, method, prelude::*};
 use wheel_machines::MAX_CASCADES;
 
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("WheelMachines")?;
+    crate::values::resolve(ruby, module)?;
     module.const_set("CAPACITY", CAPACITY)?;
     module.const_set("MAX_CASCADES", MAX_CASCADES)?;
+    module.define_singleton_method("__due", function!(checked_due, 2))?;
+    module.define_singleton_method("__drain", function!(checked_drain, 3))?;
     let handle = module.define_class("Handle", ruby.class_object())?;
     handle.undef_default_alloc_func();
     handle.define_method("scope", method!(Issued::scope, 0))?;

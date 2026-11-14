@@ -1,34 +1,51 @@
 //! Thin binding to the bounded hierarchical timing wheel.
 mod init;
+mod values;
 
 use std::cell::RefCell;
 
 use magnus::{Error, Integer, Ruby, TryConvert, Value, prelude::*, typed_data::Obj};
-use wheel_machines::{Drain, Due, Handle, Refusal, Status};
+use wheel_machines::{Drain, Due, Handle, Refusal};
+
+use crate::values::Classes;
 
 const CAPACITY: usize = 1024;
 
 type Core = wheel_machines::Wheel<u64, CAPACITY>;
 
 #[derive(Clone, Copy)]
-struct Number(u64);
+pub(crate) struct Number(pub(crate) u64);
 
 impl Number {
-    /// Counts above the address space behave as "no limit".
-    fn count(self) -> usize {
-        usize::try_from(self.0).unwrap_or(usize::MAX)
+    /// The count as a `usize`.
+    ///
+    /// # Errors
+    ///
+    /// `RangeError` above `usize::MAX`: a count is never silently capped.
+    pub(crate) fn count(self, ruby: &Ruby, what: &'static str) -> Result<usize, Error> {
+        usize::try_from(self.0).map_err(|_| {
+            Error::new(
+                ruby.exception_range_error(),
+                format!("{what} is past usize ({})", usize::MAX),
+            )
+        })
     }
+}
+
+/// `TypeError` unless `value` is an Integer; the range is the caller's check.
+fn integer(value: Value, expected: &'static str) -> Result<Value, Error> {
+    if Integer::from_value(value).is_none() {
+        return Err(Error::new(
+            Ruby::get_with(value).exception_type_error(),
+            expected,
+        ));
+    }
+    Ok(value)
 }
 
 impl TryConvert for Number {
     fn try_convert(value: Value) -> Result<Self, Error> {
-        if Integer::from_value(value).is_none() {
-            return Err(Error::new(
-                Ruby::get_with(value).exception_type_error(),
-                "expected an Integer (unsigned 64-bit)",
-            ));
-        }
-        u64::try_convert(value).map(Self)
+        u64::try_convert(integer(value, "expected an Integer (unsigned 64-bit)")?).map(Self)
     }
 }
 
@@ -38,14 +55,13 @@ struct Scope(u16);
 
 impl TryConvert for Scope {
     fn try_convert(value: Value) -> Result<Self, Error> {
-        if Integer::from_value(value).is_none() {
-            return Err(Error::new(
-                Ruby::get_with(value).exception_type_error(),
-                "expected an Integer scope (0..=65535)",
-            ));
-        }
-        u16::try_convert(value).map(Self)
+        u16::try_convert(integer(value, "expected an Integer scope (0..=65535)")?).map(Self)
     }
+}
+
+/// A refusal as the Ruby symbol it answers.
+fn refused(ruby: &Ruby, refused: Refusal) -> Value {
+    ruby.to_symbol(refusal(refused)).as_value()
 }
 
 const fn refusal(refusal: Refusal) -> &'static str {
@@ -67,6 +83,14 @@ impl Issued {
     const fn scope(&self) -> u16 {
         self.0.scope()
     }
+}
+
+/// Drain `core` into a buffer no larger than what can possibly be due.
+fn drain_core(core: &mut Core, budget: usize, limit: usize) -> (Drain, Vec<Due<u64>>) {
+    let mut due = vec![Due::default(); limit.min(core.len())];
+    let drain = core.drain(budget, &mut due);
+    due.truncate(drain.emitted());
+    (drain, due)
 }
 
 #[magnus::wrap(class = "WheelMachines::Wheel", free_immediately, size)]
@@ -122,7 +146,7 @@ impl Wheel {
         let outcome = this.core.borrow_mut().register(id.0, deadline.0);
         Ok(match outcome {
             Ok(handle) => ruby.obj_wrap(Issued(handle)).as_value(),
-            Err(refused) => ruby.to_symbol(refusal(refused)).as_value(),
+            Err(refusal) => refused(ruby, refusal),
         })
     }
 
@@ -131,7 +155,7 @@ impl Wheel {
         let outcome = this.core.borrow_mut().cancel(issued.0);
         Ok(match outcome {
             Ok(id) => ruby.integer_from_u64(id).as_value(),
-            Err(refused) => ruby.to_symbol(refusal(refused)).as_value(),
+            Err(refusal) => refused(ruby, refusal),
         })
     }
 
@@ -149,8 +173,12 @@ impl Wheel {
 
     fn drain(ruby: &Ruby, this: Obj<Self>, budget: Number, limit: Number) -> Result<Value, Error> {
         this.check_frozen()?;
-        let (drain, due) = this.drain_core(budget, limit);
-        report(ruby, drain, &due)
+        // Everything that can raise happens before the core drains.
+        let (classes, budget, limit) = Self::prepare(ruby, budget, limit)?;
+        Self::on_copy(ruby, this, |core| {
+            let (drain, due) = drain_core(core, budget, limit);
+            classes.report(ruby, drain, &due)
+        })
     }
 
     fn tick(
@@ -161,21 +189,57 @@ impl Wheel {
         limit: Number,
     ) -> Result<Value, Error> {
         this.check_frozen()?;
-        if let Err(refused) = this.core.borrow_mut().advance(now.0) {
-            return Ok(ruby.to_symbol(refusal(refused)).as_value());
-        }
-        let (drain, due) = this.drain_core(budget, limit);
-        report(ruby, drain, &due)
+        // Everything that can raise happens before the core moves.
+        let (classes, budget, limit) = Self::prepare(ruby, budget, limit)?;
+        Self::on_copy(ruby, this, |core| {
+            if let Err(refusal) = core.advance(now.0) {
+                return Ok(refused(ruby, refusal));
+            }
+            let (drain, due) = drain_core(core, budget, limit);
+            classes.report(ruby, drain, &due)
+        })
     }
 
-    /// Drain into a buffer no larger than what can possibly be due, releasing
-    /// the borrow before any Ruby object is built.
-    fn drain_core(&self, budget: Number, limit: Number) -> (Drain, Vec<Due<u64>>) {
-        let mut core = self.core.borrow_mut();
-        let mut due = vec![Due::default(); limit.count().min(core.len())];
-        let drain = core.drain(budget.count(), &mut due);
-        due.truncate(drain.emitted);
-        (drain, due)
+    /// The raising half of `drain` and `tick`: the classes resolved at init
+    /// and the count conversions, done before the core is touched.
+    fn prepare(
+        ruby: &Ruby,
+        budget: Number,
+        limit: Number,
+    ) -> Result<(Classes, usize, usize), Error> {
+        Ok((
+            Classes::get(ruby)?,
+            budget.count(ruby, "budget")?,
+            limit.count(ruby, "limit")?,
+        ))
+    }
+
+    /// Runs `act`, which builds the Ruby answer, on a copy of the wheel and
+    /// keeps the copy only once the answer exists: a raise while building
+    /// leaves every due entry in the wheel. Right before the store the
+    /// receiver is checked again: frozen meanwhile raises `FrozenError`,
+    /// changed meanwhile (a redefined `new` calling back in) raises
+    /// `RuntimeError`, and in both cases nothing is applied. No borrow is held
+    /// while `act` runs.
+    fn on_copy(
+        ruby: &Ruby,
+        this: Obj<Self>,
+        act: impl FnOnce(&mut Core) -> Result<Value, Error>,
+    ) -> Result<Value, Error> {
+        this.check_frozen()?;
+        let before = this.core.borrow().clone();
+        let mut after = before.clone();
+        let answer = act(&mut after)?;
+        this.check_frozen()?;
+        let mut held = this.core.borrow_mut();
+        if *held != before {
+            return Err(Error::new(
+                ruby.exception_runtime_error(),
+                "the wheel changed while the answer was built; the call was not applied",
+            ));
+        }
+        *held = after;
+        Ok(answer)
     }
 
     fn now(&self) -> u64 {
@@ -197,23 +261,4 @@ impl Wheel {
     const fn capacity() -> usize {
         CAPACITY
     }
-}
-
-/// Build a `WheelMachines::Drain` holding `WheelMachines::Due` values.
-fn report(ruby: &Ruby, drain: Drain, due: &[Due<u64>]) -> Result<Value, Error> {
-    let module = ruby.define_module("WheelMachines")?;
-    let due_class: Value = module.const_get("Due")?;
-    let drain_class: Value = module.const_get("Drain")?;
-    let rows = ruby.ary_new_capa(due.len());
-    for entry in due {
-        let row: Value = due_class.funcall("new", (entry.id, entry.deadline))?;
-        rows.push(row)?;
-    }
-    rows.freeze();
-    let status = ruby.to_symbol(match drain.status {
-        Status::CaughtUp => "caught_up",
-        Status::OutputFull => "output_full",
-        Status::BudgetSpent => "budget_spent",
-    });
-    drain_class.funcall("new", (rows, drain.cascaded, status))
 }

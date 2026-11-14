@@ -8,12 +8,18 @@ use core::fmt;
 
 use periscope_machines::{Issuer, scope_of};
 
+mod values;
+
+pub use values::{Drain, Due, Status};
+
 /// Wheel levels; eleven six-bit digits cover every `u64` tick.
 const LEVELS: usize = 11;
 /// Slots per level.
 const SLOTS: usize = 64;
 /// Bits of the tick consumed by one level.
 const BITS: usize = 6;
+/// The low `BITS` bits of a tick: its digit within one level.
+const DIGIT_MASK: u64 = SLOTS as u64 - 1;
 /// "No node" link.
 const NIL: usize = usize::MAX;
 
@@ -78,65 +84,6 @@ impl fmt::Display for Refusal {
 }
 
 impl core::error::Error for Refusal {}
-
-/// One due registration: the caller's id and the deadline it was registered with.
-///
-/// `Due::default()` (for `I: Default`) is a placeholder for pre-filling a
-/// drain buffer: its deadline is 0, which is always [`Refusal::Elapsed`], so
-/// the wheel never emits it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Due<I> {
-    /// Caller-supplied identifier.
-    pub id: I,
-    /// Tick the id was registered for; `now - deadline` is its lateness.
-    pub deadline: u64,
-}
-
-impl<I> Due<I> {
-    /// Build a value, typically to compare against a drained one or to
-    /// pre-fill a drain buffer when `I` has no `Default`.
-    #[must_use]
-    pub const fn new(id: I, deadline: u64) -> Self {
-        Self { id, deadline }
-    }
-}
-
-/// Why a drain call returned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
-    /// Every id due at the wheel's tick has been emitted; nothing is left to do
-    /// until the tick advances.
-    CaughtUp,
-    /// The output buffer is full and more ids are due; drain again.
-    OutputFull,
-    /// The work budget is spent and work remains; drain again.
-    BudgetSpent,
-}
-
-/// What one drain call did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Drain {
-    /// Due ids written to the front of the output buffer; one work unit each.
-    pub emitted: usize,
-    /// Entries moved one level down; one work unit each.
-    pub cascaded: usize,
-    /// Why the call returned.
-    pub status: Status,
-}
-
-impl Drain {
-    /// Work units charged: emitted ids plus cascade moves.
-    #[must_use]
-    pub const fn work(&self) -> usize {
-        self.emitted + self.cascaded
-    }
-
-    /// `true` when the wheel is caught up with its tick.
-    #[must_use]
-    pub const fn is_caught_up(&self) -> bool {
-        matches!(self.status, Status::CaughtUp)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Node<I> {
@@ -296,7 +243,8 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
     /// one this wheel never issued included.
     #[must_use]
     pub fn deadline(&self, handle: Handle) -> Option<u64> {
-        self.lookup(handle).map(|index| self.nodes[index].deadline)
+        self.lookup(handle)
+            .map(|(index, _)| self.nodes[index].deadline)
     }
 
     /// Tick at which a drain next has work: never later than the earliest
@@ -363,9 +311,8 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
     /// (another scope). The wheel is unchanged. A repeat on a dead handle is
     /// never honoured: the wheel keeps no record of how a registration ended.
     pub fn cancel(&mut self, handle: Handle) -> Result<I, Refusal> {
-        let index = self.lookup(handle).ok_or(Refusal::Stale)?;
-        let due = self.release(index).ok_or(Refusal::Stale)?;
-        Ok(due.id)
+        let (index, id) = self.lookup(handle).ok_or(Refusal::Stale)?;
+        Ok(self.release(index, id).id)
     }
 
     /// Move the wheel's tick forward. Emits nothing; call [`Wheel::drain`].
@@ -402,8 +349,7 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
                     if head == NIL {
                         break;
                     }
-                    if drain.work() == budget {
-                        drain.status = Status::BudgetSpent;
+                    if !drain.affords(budget) {
                         return drain;
                     }
                     self.unlink(head);
@@ -429,18 +375,26 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
                 if head == NIL {
                     break;
                 }
-                if drain.work() == budget {
-                    drain.status = Status::BudgetSpent;
+                if !drain.affords(budget) {
                     return drain;
                 }
                 let Some(place) = out.get_mut(drain.emitted) else {
                     drain.status = Status::OutputFull;
                     return drain;
                 };
-                if let Some(due) = self.release(head) {
-                    *place = due;
-                    drain.emitted += 1;
-                }
+                let Some(id) = self.nodes[head].id else {
+                    debug_assert!(false, "every entry filed in a slot is live");
+                    // The one arm that cannot stop with nothing changed: a
+                    // drain that left this entry filed would find it first on
+                    // every call and never emit what is due behind it, so the
+                    // wheel would stall for good. Taking it off the slot is the
+                    // conservative move: it is already on the free list, so
+                    // unlinking it frees nothing twice and emits nothing.
+                    self.unlink(head);
+                    continue;
+                };
+                *place = self.release(head, id);
+                drain.emitted += 1;
             }
         }
     }
@@ -458,13 +412,15 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
     }
 
     /// Origin first: a handle this wheel's issuer never handed out names
-    /// nothing here, whatever entry it points at.
-    fn lookup(&self, handle: Handle) -> Option<usize> {
+    /// nothing here, whatever entry it points at. Answers the live entry and
+    /// its id.
+    fn lookup(&self, handle: Handle) -> Option<(usize, I)> {
         if !self.issuer.owns(handle.key) {
             return None;
         }
         let node = self.nodes.get(handle.slot)?;
-        (node.id.is_some() && node.key == handle.key).then_some(handle.slot)
+        let id = node.id.filter(|_| node.key == handle.key)?;
+        Some((handle.slot, id))
     }
 
     /// Earliest non-empty slot: lower levels always expire before higher ones,
@@ -522,37 +478,37 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
         }
     }
 
-    /// Unlink a live node and return it to the free list.
-    fn release(&mut self, index: usize) -> Option<Due<I>> {
-        let id = self.nodes[index].id?;
+    /// Unlink a live node holding `id` and return it to the free list.
+    const fn release(&mut self, index: usize, id: I) -> Due<I> {
         self.unlink(index);
         let node = &mut self.nodes[index];
         node.id = None;
         node.next = self.free;
         self.free = index;
         self.len -= 1;
-        Some(Due {
+        Due {
             id,
             deadline: node.deadline,
-        })
+        }
     }
 }
 
 /// Level of the highest six-bit digit in which `deadline` differs from `elapsed`.
 const fn level_of(elapsed: u64, deadline: u64) -> usize {
-    let masked = (elapsed ^ deadline) | 63;
-    (63 - masked.leading_zeros() as usize) / BITS
+    // Setting the lowest digit puts equal ticks on level zero.
+    let masked = (elapsed ^ deadline) | DIGIT_MASK;
+    (u64::BITS - 1 - masked.leading_zeros()) as usize / BITS
 }
 
 /// The six-bit digit of `tick` at `level`.
 const fn digit(tick: u64, level: usize) -> usize {
-    ((tick >> (BITS * level)) & 63) as usize
+    ((tick >> (BITS * level)) & DIGIT_MASK) as usize
 }
 
 /// First tick covered by `slot` of `level` in the rotation `elapsed` is in.
 const fn slot_start(elapsed: u64, level: usize, slot: usize) -> u64 {
     let shift = BITS * (level + 1);
-    let high = if shift >= 64 {
+    let high = if shift >= u64::BITS as usize {
         0
     } else {
         (elapsed >> shift) << shift
