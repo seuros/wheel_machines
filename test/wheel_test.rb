@@ -160,6 +160,15 @@ class WheelTest < Minitest::Test
     assert_equal 1, wheel.cancel(handle)
   end
 
+  # A refused handle's TypeError names the class it got.
+  def test_a_refused_handle_names_the_class_received
+    wheel = WheelMachines::Wheel.new
+    error = assert_raises(TypeError) { wheel.cancel(wheel) }
+    assert_equal 'handle must be a WheelMachines::Handle, not WheelMachines::Wheel', error.message
+    error = assert_raises(TypeError) { wheel.deadline(7) }
+    assert_equal 'handle must be a WheelMachines::Handle, not Integer', error.message
+  end
+
   def test_capacity_refuses_without_evicting
     wheel = WheelMachines::Wheel.new
     assert_equal 1024, WheelMachines::CAPACITY

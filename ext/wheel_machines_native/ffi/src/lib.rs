@@ -5,7 +5,7 @@ mod values;
 use std::cell::RefCell;
 
 use magnus::{Error, Ruby, Value, prelude::*, typed_data::Obj};
-use matryona_machines::ruby::{SymbolNames, exact_typed, integer, keep, symbol};
+use matryona_machines::ruby::{SymbolNames, exact_typed_with, integer, keep, symbol};
 use wheel_machines::{Drain, Due, Handle, Refusal};
 
 use crate::values::Classes;
@@ -42,11 +42,16 @@ impl Issued {
     }
 
     /// The core handle `value` wraps: exactly a `WheelMachines::Handle`, a
-    /// subclass instance refused with `TypeError`.
+    /// subclass instance refused with `TypeError` naming the class received.
     fn from(ruby: &Ruby, value: Value) -> Result<Handle, Error> {
         let class = Classes::get(ruby)?.handle.get(ruby);
-        exact_typed::<Self>(ruby, value, class, "expected a WheelMachines::Handle")
-            .map(|issued| issued.0)
+        exact_typed_with::<Self>(ruby, value, class, || {
+            format!(
+                "handle must be a WheelMachines::Handle, not {}",
+                value.class()
+            )
+        })
+        .map(|issued| issued.0)
     }
 }
 
