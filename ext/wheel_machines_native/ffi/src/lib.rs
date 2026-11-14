@@ -5,7 +5,7 @@ mod values;
 use std::cell::RefCell;
 
 use magnus::{Error, Ruby, Value, prelude::*, typed_data::Obj};
-use matryona_machines::ruby::{exact_typed, integer, keep, symbol};
+use matryona_machines::ruby::{SymbolNames, exact_typed, integer, keep, symbol};
 use wheel_machines::{Drain, Due, Handle, Refusal};
 
 use crate::values::Classes;
@@ -14,19 +14,21 @@ const CAPACITY: usize = 1024;
 
 type Core = wheel_machines::Wheel<u64, CAPACITY>;
 
-/// A refusal as the Ruby symbol it answers.
-fn refused(ruby: &Ruby, refused: Refusal) -> Value {
-    symbol(ruby, refusal(refused)).as_value()
+matryona_machines::symbols! {
+    /// The symbol each refusal answers as. `Regressed` carries data, so the
+    /// table names refusals and never parses one back.
+    Refusals for Refusal as "a refusal" => names_only {
+        Elapsed => "elapsed",
+        Full => "full",
+        Exhausted => "exhausted",
+        Regressed { .. } => "regressed",
+        Stale => "stale",
+    }
 }
 
-const fn refusal(refusal: Refusal) -> &'static str {
-    match refusal {
-        Refusal::Elapsed => "elapsed",
-        Refusal::Full => "full",
-        Refusal::Exhausted => "exhausted",
-        Refusal::Regressed { .. } => "regressed",
-        Refusal::Stale => "stale",
-    }
+/// A refusal as the Ruby symbol it answers.
+fn refused(ruby: &Ruby, refused: Refusal) -> Value {
+    Refusals::symbol(ruby, &refused).as_value()
 }
 
 /// `WheelMachines::Handle`: the core's `Handle`. It carries the scope of the
@@ -131,7 +133,10 @@ impl Wheel {
         this.check_frozen()?;
         let now = integer(now, "now")?;
         let outcome = this.core.borrow_mut().advance(now);
-        Ok(symbol(ruby, outcome.map_or_else(refusal, |()| "advanced")).as_value())
+        Ok(outcome.map_or_else(
+            |refusal| refused(ruby, refusal),
+            |()| symbol(ruby, "advanced").as_value(),
+        ))
     }
 
     /// The answer is built from a copy of the wheel kept only once it exists
