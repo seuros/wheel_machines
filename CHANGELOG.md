@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.5.0...wheel_machines/v0.5.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** require matryona-machines &gt;= 0.3 with a names_only refusal table ([5a85b47](https://github.com/seuros/wheel_machines/commit/5a85b472af8714f8d6a08ff08295032c5fd85c56))
+
 ## [0.5.0](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.4.0...wheel_machines/v0.5.0) (2026-11-14)
 
 
