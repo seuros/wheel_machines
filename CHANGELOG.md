@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.5.1...wheel_machines/v0.6.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* wheel handle refusals name the class received
+
+### Features
+
+* wheel handle refusals name the class received ([f1edc66](https://github.com/seuros/wheel_machines/commit/f1edc6638ccb62c90dbb44cc1a6d37208ccb122d))
+
 ## [0.5.1](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.5.0...wheel_machines/v0.5.1) (2026-11-14)
 
 
