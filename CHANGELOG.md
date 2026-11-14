@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.3.0...wheel_machines/v0.4.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* seal values, check exact classes natively, drain and tick never lose an entry
+
+### Features
+
+* seal values, check exact classes natively, drain and tick never lose an entry ([92a1f59](https://github.com/seuros/wheel_machines/commit/92a1f593f23777cd0db0a24e6000aa06c0a66141))
+
 ## [0.3.0](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.2.0...wheel_machines/v0.3.0) (2026-11-13)
 
 
