@@ -4,6 +4,7 @@ use crate::{
     values::{checked_drain, checked_due},
 };
 use magnus::{Error, Ruby, function, method, prelude::*};
+use matryona_machines::ruby::Class;
 use wheel_machines::MAX_CASCADES;
 
 #[magnus::init]
@@ -15,8 +16,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     module.define_singleton_method("__drain", function!(checked_drain, 3))?;
     let handle = module.define_class("Handle", ruby.class_object())?;
     handle.undef_default_alloc_func();
-    crate::values::resolve(ruby, module, handle)?;
     handle.define_method("scope", method!(Issued::scope, 0))?;
+    crate::values::resolve(ruby, module, handle)?;
     let class = module.define_class("Wheel", ruby.class_object())?;
     class.undef_default_alloc_func();
     class.define_singleton_method("new", function!(Wheel::new, 0))?;
@@ -36,5 +37,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("empty?", method!(Wheel::is_empty, 0))?;
     class.define_method("next_wake", method!(Wheel::next_wake, 0))?;
     class.define_method("capacity", function!(Wheel::capacity, 0))?;
-    Ok(())
+    // `new`, `with_scope`, `starting_at` and `resumed` answer a Wheel: its
+    // class is fixed now, like the handle's.
+    Class::pin_wrapped::<Wheel>(ruby, class).map(drop)
 }

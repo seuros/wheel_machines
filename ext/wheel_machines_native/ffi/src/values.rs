@@ -5,8 +5,12 @@ use magnus::{Error, RArray, RClass, RModule, Ruby, Symbol, Value, prelude::*};
 use matryona_machines::ruby::{Class, Registry, Symbols, exact_array, exact_fields, integer};
 use wheel_machines::{Drain, Due, Status};
 
+use crate::Issued;
+
 /// `Due` and `Drain`, as `lib/wheel_machines.rb` defined them before the
-/// extension loaded, and `Handle`, which init defines.
+/// extension loaded, and `Handle`, which init defines and pins as magnus's
+/// class for every handle: `register` builds one after the core moved, and
+/// building it must run no Ruby (no `Object.const_get`).
 pub struct Classes {
     pub handle: Class,
     due: Class,
@@ -17,7 +21,7 @@ static CLASSES: Registry<Classes> = Registry::new("wheel_machines");
 
 pub fn resolve(ruby: &Ruby, module: RModule, handle: RClass) -> Result<(), Error> {
     let classes = Classes {
-        handle: Class::pin(ruby, handle),
+        handle: Class::pin_wrapped::<Issued>(ruby, handle)?,
         due: Class::resolve(ruby, module, "Due")?,
         drain: Class::resolve(ruby, module, "Drain")?,
     };
