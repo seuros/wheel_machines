@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.7.0...wheel_machines/v0.7.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* fix wrapped classes at load so building a value runs no Ruby ([0920968](https://github.com/seuros/wheel_machines/commit/092096836b5c2a4cd90dff3629cbd6b64a068ae4))
+
 ## [0.7.0](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.6.0...wheel_machines/v0.7.0) (2026-11-16)
 
 
