@@ -147,26 +147,33 @@ class WheelTest < Minitest::Test
     assert_equal :stale, WheelMachines::Wheel.new.cancel(handle)
   end
 
-  # A Handle is read as exactly a Handle. A subclass has no instance (the
-  # allocator is gone and only the wheel issues handles), and a wheel is not
-  # a handle.
+  # A Handle is read as exactly a Handle. There is no subclass (Wheel and
+  # Handle are sealed, the allocator is gone and only the wheel issues
+  # handles), and a wheel is not a handle.
   def test_cancel_and_deadline_read_exactly_a_handle
     wheel = WheelMachines::Wheel.new
     handle = wheel.register(1, 10)
-    assert_raises(TypeError) { Class.new(WheelMachines::Handle).allocate }
+    [WheelMachines::Wheel, WheelMachines::Handle].each do |native|
+      error = assert_raises(TypeError) { Class.new(native) }
+      assert_equal "#{native} cannot be subclassed", error.message
+    end
     assert_raises(TypeError) { wheel.cancel(wheel) }
     assert_raises(TypeError) { wheel.deadline(wheel) }
     assert_equal 10, wheel.deadline(handle.tap(&:singleton_class))
     assert_equal 1, wheel.cancel(handle)
   end
 
-  # A refused handle's TypeError names the class it got.
+  # A refused handle's TypeError names the class it got: the real class,
+  # never an opened singleton class.
   def test_a_refused_handle_names_the_class_received
     wheel = WheelMachines::Wheel.new
     error = assert_raises(TypeError) { wheel.cancel(wheel) }
     assert_equal 'handle must be a WheelMachines::Handle, not WheelMachines::Wheel', error.message
     error = assert_raises(TypeError) { wheel.deadline(7) }
     assert_equal 'handle must be a WheelMachines::Handle, not Integer', error.message
+    opened = WheelMachines::Wheel.new.tap { |w| def w.opened = true }
+    error = assert_raises(TypeError) { wheel.cancel(opened) }
+    assert_equal 'handle must be a WheelMachines::Handle, not WheelMachines::Wheel', error.message
   end
 
   def test_capacity_refuses_without_evicting

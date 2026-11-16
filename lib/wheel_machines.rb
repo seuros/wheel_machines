@@ -55,4 +55,11 @@ module WheelMachines
     value.singleton_class.undef_method(:allocate)
     value.define_singleton_method(:inherited) { |_| raise TypeError, "#{value} cannot be subclassed" }
   end
+
+  # Wheel and Handle wrap native state and have no allocator: a subclass's
+  # `new` (or `with_scope`) would build the base class anyway, so subclassing
+  # raises too.
+  [Wheel, Handle].each do |native|
+    native.define_singleton_method(:inherited) { |_| raise TypeError, "#{native} cannot be subclassed" }
+  end
 end

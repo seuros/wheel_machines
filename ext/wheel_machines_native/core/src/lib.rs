@@ -112,6 +112,15 @@ impl<I> Node<I> {
 
 /// Fixed-capacity hierarchical timing wheel over caller-supplied ticks.
 ///
+/// Index invariants the list primitives (`settle`, `push_back`, `unlink`,
+/// `release`, `register`) index on directly, because they are `const fn` and
+/// `<[T]>::get` is not callable there: `free`, every `heads` cell and every
+/// filed node's `prev`/`next` is `NIL` or below `N`, and `NIL` is checked
+/// before it is followed; a handle's slot is bounds-checked once, in `lookup`.
+/// Every level is below `LEVELS` (`level_of` answers at most 63 / 6 = 10 and
+/// `next_slot` enumerates `occupied`) and every slot below `SLOTS` (a six-bit
+/// `digit`, or `trailing_zeros` of a non-zero `u64`).
+///
 /// Holds at most `N` registrations of ids `I`. Eleven levels of 64 slots index
 /// every `u64` deadline, so no deadline is too far away. The wheel has no
 /// clock: [`Wheel::advance`] is the only way its tick moves.
@@ -244,7 +253,8 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
     #[must_use]
     pub fn deadline(&self, handle: Handle) -> Option<u64> {
         self.lookup(handle)
-            .map(|(index, _)| self.nodes[index].deadline)
+            .and_then(|(index, _)| self.nodes.get(index))
+            .map(|node| node.deadline)
     }
 
     /// Tick at which a drain next has work: never later than the earliest
@@ -286,6 +296,7 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
         };
         let index = self.free;
         self.free = self.nodes[index].next;
+        // A free entry exists, so fewer than `N` are live: no overflow.
         self.len += 1;
         let node = &mut self.nodes[index];
         node.id = Some(id);
@@ -485,6 +496,7 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
         node.id = None;
         node.next = self.free;
         self.free = index;
+        // `index` held a live registration, so `len` is at least one.
         self.len -= 1;
         Due {
             id,
@@ -496,6 +508,7 @@ impl<I: Copy, const N: usize> Wheel<I, N> {
 /// Level of the highest six-bit digit in which `deadline` differs from `elapsed`.
 const fn level_of(elapsed: u64, deadline: u64) -> usize {
     // Setting the lowest digit puts equal ticks on level zero.
+    // `masked` is at least `DIGIT_MASK`, so it has at most 58 leading zeros.
     let masked = (elapsed ^ deadline) | DIGIT_MASK;
     (u64::BITS - 1 - masked.leading_zeros()) as usize / BITS
 }

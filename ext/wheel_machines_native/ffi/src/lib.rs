@@ -5,7 +5,7 @@ mod values;
 use std::cell::RefCell;
 
 use magnus::{Error, Ruby, Value, prelude::*, typed_data::Obj};
-use matryona_machines::ruby::{SymbolNames, exact_typed_with, integer, keep, symbol};
+use matryona_machines::ruby::{SymbolNames, class_name, exact_typed_with, integer, keep, symbol};
 use wheel_machines::{Drain, Due, Handle, Refusal};
 
 use crate::values::Classes;
@@ -48,7 +48,7 @@ impl Issued {
         exact_typed_with::<Self>(ruby, value, class, || {
             format!(
                 "handle must be a WheelMachines::Handle, not {}",
-                value.class()
+                class_name(value)
             )
         })
         .map(|issued| issued.0)

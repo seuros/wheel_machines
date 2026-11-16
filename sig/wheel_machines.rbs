@@ -3,6 +3,12 @@ module WheelMachines
   CAPACITY: Integer
   MAX_CASCADES: Integer
 
+  # Private native checks behind `Due.new` and `Drain.new`: the fields as the
+  # core holds them (`due` as a frozen copy), TypeError/RangeError for what it
+  # rejects.
+  private def self.__due: (Integer id, Integer deadline) -> [Integer, Integer]
+  private def self.__drain: (Array[Due] due, Integer cascaded, Drain::status status) -> [Array[Due], Integer, Drain::status]
+
   # Both fields are Integers in 0..2**64-1: TypeError for a non-Integer,
   # RangeError outside the range.
   class Due < Data
@@ -32,12 +38,14 @@ module WheelMachines
 
   # Mirrors the core's `Handle`: names one registration on the wheel that
   # issued it and carries that wheel's scope. Opaque; it cannot be built or
-  # copied by hand. A wheel in another scope answers :stale to it.
+  # copied by hand. A wheel in another scope answers :stale to it. Sealed:
+  # subclassing raises TypeError.
   class Handle
     # The scope of the wheel that issued it, 0..65535.
     def scope: () -> Integer
   end
 
+  # Sealed: no allocator, and subclassing raises TypeError.
   class Wheel
     # Tick zero, scope zero, nothing issued.
     def self.new: () -> Wheel
