@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.6.0...wheel_machines/v0.7.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* seal Wheel and Handle against subclassing
+
+### Features
+
+* seal Wheel and Handle against subclassing ([3454640](https://github.com/seuros/wheel_machines/commit/3454640fb4173f6e67233f6bcf9f9674a40f5604))
+
 ## [0.6.0](https://github.com/seuros/wheel_machines/compare/wheel_machines/v0.5.1...wheel_machines/v0.6.0) (2026-11-14)
 
 

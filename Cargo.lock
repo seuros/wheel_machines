@@ -291,7 +291,7 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "wheel-machines"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "matryona-machines",
  "periscope-machines",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "wheel_machines_native"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "magnus",
  "matryona-machines",
